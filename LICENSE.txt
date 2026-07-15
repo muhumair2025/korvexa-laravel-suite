@@ -1,0 +1,17 @@
+Laravel Suite License
+
+Copyright © 2026 Korvexa
+Developer: Muhammad Umair
+
+Laravel Suite is developed to simplify PHP and Laravel development.
+
+Permission is granted to use this software free of charge for personal,
+educational and commercial development purposes.
+
+You may not redistribute modified versions under the same branding
+without prior permission.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+Website:
+https://korvexa.app
