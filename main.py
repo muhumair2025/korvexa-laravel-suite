@@ -22,6 +22,7 @@ def main():
             # Find and restore the existing window
             hwnd = ctypes.windll.user32.FindWindowW(None, "Laravel Development Suite")
             if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 5)  # SW_SHOW = 5
                 ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE = 9
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
             sys.exit(0)

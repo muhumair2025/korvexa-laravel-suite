@@ -63,26 +63,37 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.main_layout.addWidget(self.tabs)
         
-        # Initialize views
+        # Initialize only default active view on start (onboarding setup)
         self.onboarding_view = OnboardingView(self)
-        self.services_view = ServicesView(self)
-        self.switcher_view = SwitcherView(self)
-        self.vhost_view = VHostView(self)
-        self.laravel_view = LaravelView(self)
-        self.database_view = DatabaseView(self)
-        self.settings_view = SettingsView(self)
-        self.about_view = AboutView(self)
-        
-        # Add views as tabs
         self.tabs.addTab(self.onboarding_view, "Setup & Onboarding")
-        self.tabs.addTab(self.services_view, "Services Control")
-        self.tabs.addTab(self.switcher_view, "PHP Version Control")
-        self.tabs.addTab(self.vhost_view, "Sites & Domains")
-        self.tabs.addTab(self.laravel_view, "Laravel Projects")
-        self.tabs.addTab(self.database_view, "Database Manager")
-        self.tabs.addTab(self.settings_view, "Logs & Settings")
-        self.tabs.addTab(self.about_view, "About & Help")
         
+        # Lazy loaded views initialized to None
+        self.services_view = None
+        self.switcher_view = None
+        self.vhost_view = None
+        self.laravel_view = None
+        self.database_view = None
+        self.settings_view = None
+        self.about_view = None
+        
+        # Create container widgets for lazy tabs
+        self.tab_containers = {}
+        lazy_tabs = [
+            (1, "Services Control"),
+            (2, "PHP Version Control"),
+            (3, "Sites & Domains"),
+            (4, "Laravel Projects"),
+            (5, "Database Manager"),
+            (6, "Logs & Settings"),
+            (7, "About & Help")
+        ]
+        for idx, label in lazy_tabs:
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            self.tabs.addTab(container, label)
+            self.tab_containers[idx] = (container, container_layout)
+            
         # Tab switch event mapping
         self.tabs.currentChanged.connect(self.on_tab_changed)
         
@@ -90,24 +101,56 @@ class MainWindow(QMainWindow):
         self.on_tab_changed(0)
         
     def on_tab_changed(self, index):
-        # Stop timers on inactive tabs to optimize CPU usage
-        self.services_view.stop_timer()
-        self.settings_view.stop_timer()
-        
+        # Stop active timers to optimize CPU usage
+        if self.services_view:
+            self.services_view.stop_timer()
+        if self.settings_view:
+            self.settings_view.stop_timer()
+            
+        # Lazy load views on tab selection
         if index == 0:
             self.onboarding_view.refresh_status()
+            
         elif index == 1:
+            if not self.services_view:
+                self.services_view = ServicesView(self)
+                self.tab_containers[1][1].addWidget(self.services_view)
             self.services_view.start_timer()
+            
         elif index == 2:
+            if not self.switcher_view:
+                self.switcher_view = SwitcherView(self)
+                self.tab_containers[2][1].addWidget(self.switcher_view)
             self.switcher_view.refresh_status()
+            
         elif index == 3:
+            if not self.vhost_view:
+                self.vhost_view = VHostView(self)
+                self.tab_containers[3][1].addWidget(self.vhost_view)
             self.vhost_view.refresh_table()
+            
         elif index == 4:
+            if not self.laravel_view:
+                self.laravel_view = LaravelView(self)
+                self.tab_containers[4][1].addWidget(self.laravel_view)
             self.laravel_view.refresh_project_list()
+            
         elif index == 5:
+            if not self.database_view:
+                self.database_view = DatabaseView(self)
+                self.tab_containers[5][1].addWidget(self.database_view)
             self.database_view.refresh_all()
+            
         elif index == 6:
+            if not self.settings_view:
+                self.settings_view = SettingsView(self)
+                self.tab_containers[6][1].addWidget(self.settings_view)
             self.settings_view.start_timer()
+            
+        elif index == 7:
+            if not self.about_view:
+                self.about_view = AboutView(self)
+                self.tab_containers[7][1].addWidget(self.about_view)
             
     def apply_theme(self, theme):
         self.theme = theme
@@ -202,11 +245,28 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.warning(f"Failed to disable immersive dark title bar: {e}")
                 
+        # Refresh icons on all views if they are initialized and not None
+        if getattr(self, 'onboarding_view', None):
+            self.onboarding_view.refresh_icons()
+        if getattr(self, 'services_view', None):
+            self.services_view.refresh_icons()
+        if getattr(self, 'switcher_view', None):
+            self.switcher_view.refresh_icons()
+        if getattr(self, 'settings_view', None):
+            self.settings_view.refresh_icons()
+        if getattr(self, 'about_view', None):
+            self.about_view.refresh_icons()
+        if getattr(self, 'vhost_view', None):
+            self.vhost_view.refresh_table()
+            
         # Force redraw and resolve styles for all widgets in the application
         for widget in app.allWidgets():
             widget.style().unpolish(widget)
             widget.style().polish(widget)
             widget.update()
+
+    def get_icon_color(self):
+        return "#ffffff" if self.theme == "dark" else "#1e293b"
 
     def update_env_root(self, new_path):
         self.env_root = new_path
@@ -271,13 +331,13 @@ class MainWindow(QMainWindow):
         restore_action.triggered.connect(self.showNormal)
         
         start_all_action = QAction("Start All Services", self)
-        start_all_action.triggered.connect(self.services_view.start_all_services)
+        start_all_action.triggered.connect(self.tray_start_all_services)
         
         stop_all_action = QAction("Stop All Services", self)
-        stop_all_action.triggered.connect(self.services_view.stop_all_services)
+        stop_all_action.triggered.connect(self.tray_stop_all_services)
         
         admin_db_action = QAction("Open phpMyAdmin", self)
-        admin_db_action.triggered.connect(self.services_view.open_phpmyadmin)
+        admin_db_action.triggered.connect(self.tray_open_phpmyadmin)
         
         exit_action = QAction("Exit Suite", self)
         exit_action.triggered.connect(self.force_exit)
@@ -293,6 +353,24 @@ class MainWindow(QMainWindow):
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
+        
+    def tray_start_all_services(self):
+        if not self.services_view:
+            self.services_view = ServicesView(self)
+            self.tab_containers[1][1].addWidget(self.services_view)
+        self.services_view.start_all_services()
+        
+    def tray_stop_all_services(self):
+        if not self.services_view:
+            self.services_view = ServicesView(self)
+            self.tab_containers[1][1].addWidget(self.services_view)
+        self.services_view.stop_all_services()
+        
+    def tray_open_phpmyadmin(self):
+        if not self.services_view:
+            self.services_view = ServicesView(self)
+            self.tab_containers[1][1].addWidget(self.services_view)
+        self.services_view.open_phpmyadmin()
 
     def on_tray_activated(self, reason):
         from PySide6.QtWidgets import QSystemTrayIcon

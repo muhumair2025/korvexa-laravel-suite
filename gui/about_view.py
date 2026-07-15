@@ -41,7 +41,7 @@ class AboutView(QWidget):
         title_label = QLabel("Laravel Development Suite")
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #ef4444;")
         
-        version_label = QLabel("Product Version: 1.0.0 (Stable Release)")
+        version_label = QLabel("Product Version: 1.0.1 (Stable Release)")
         version_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #94a3b8;")
         
         desc_label = QLabel("A lightweight, lightning-fast developer stack manager for local PHP & Laravel development on Windows. Run Nginx, Apache, MariaDB, and PHP in isolation without heavy virtualization.")
@@ -72,17 +72,16 @@ class AboutView(QWidget):
         dev_email = QLabel("Email: muhumair2022@ggmail.com")
         dev_email.setStyleSheet("font-size: 11px; color: #94a3b8;")
         
-        btn_email = QPushButton(" Contact Developer")
-        btn_email.setIcon(qta.icon("fa5s.envelope"))
-        btn_email.setIconSize(QSize(12, 12))
-        btn_email.setFixedWidth(150)
-        btn_email.clicked.connect(lambda: webbrowser.open("mailto:muhumair2022@ggmail.com"))
+        self.btn_email = QPushButton(" Contact Developer")
+        self.btn_email.setIconSize(QSize(12, 12))
+        self.btn_email.setFixedWidth(150)
+        self.btn_email.clicked.connect(lambda: webbrowser.open("mailto:muhumair2022@ggmail.com"))
         
         dev_layout.addWidget(dev_title)
         dev_layout.addWidget(dev_name)
         dev_layout.addWidget(dev_role)
         dev_layout.addWidget(dev_email)
-        dev_layout.addWidget(btn_email)
+        dev_layout.addWidget(self.btn_email)
         content_layout.addWidget(dev_card)
         
         # Instructions List Card
@@ -119,3 +118,8 @@ class AboutView(QWidget):
         
         scroll.setWidget(content_widget)
         layout.addWidget(scroll)
+        self.refresh_icons()
+        
+    def refresh_icons(self):
+        color = self.main_win.get_icon_color()
+        self.btn_email.setIcon(qta.icon("fa5s.envelope", color=color))

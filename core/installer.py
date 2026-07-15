@@ -16,6 +16,8 @@ DOWNLOAD_URLS = {
     "git": "https://github.com/git-for-windows/git/releases/download/v2.45.1.windows.1/Git-2.45.1-64-bit.exe",
     "php": "https://windows.php.net/downloads/releases/archives/php-8.2.20-Win32-vs16-x64.zip",
     "php83": "https://windows.php.net/downloads/releases/archives/php-8.3.8-Win32-vs16-x64.zip",
+    "php84": "https://windows.php.net/downloads/releases/archives/php-8.4.3-Win32-vs17-x64.zip",
+    "php85": "https://windows.php.net/downloads/releases/archives/php-8.5.1-Win32-vs17-x64.zip",
     "composer": "https://getcomposer.org/composer.phar",
     "laravel": "https://github.com/laravel/installer",
     "nginx": "https://nginx.org/download/nginx-1.24.0.zip",
@@ -26,12 +28,16 @@ DOWNLOAD_URLS = {
 }
 
 def download_file(url, dest_path, progress_callback=None):
-    """Downloads a file with retries for robust connection recovery."""
+    """Downloads a file with support for resuming (HTTP Range) and retries."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     
     # Bypass local certificate stores (avoids SSL: CERTIFICATE_VERIFY_FAILED on Windows)
     context = ssl._create_unverified_context()
     
+    initial_bytes = 0
+    if os.path.exists(dest_path):
+        initial_bytes = os.path.getsize(dest_path)
+        
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
@@ -40,12 +46,46 @@ def download_file(url, dest_path, progress_callback=None):
                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             )
             
-            with urllib.request.urlopen(req, timeout=30, context=context) as response:
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
+            if initial_bytes > 0:
+                req.add_header('Range', f'bytes={initial_bytes}-')
+                
+            try:
+                response = urllib.request.urlopen(req, timeout=30, context=context)
+            except urllib.error.HTTPError as he:
+                if he.code in [416, 400]:
+                    initial_bytes = 0
+                    req = urllib.request.Request(
+                        url, 
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                    )
+                    response = urllib.request.urlopen(req, timeout=30, context=context)
+                else:
+                    raise he
+                    
+            with response:
+                status = response.status if hasattr(response, 'status') else response.code
+                
+                if status == 206:
+                    mode = 'ab'
+                    content_range = response.headers.get('Content-Range', '')
+                    total_size = initial_bytes
+                    if content_range:
+                        match = re.search(r'/(\d+)', content_range)
+                        if match:
+                            total_size = int(match.group(1))
+                    if not total_size or total_size <= initial_bytes:
+                        cl = response.headers.get('content-length')
+                        total_size = initial_bytes + (int(cl) if cl else 0)
+                else:
+                    mode = 'wb'
+                    initial_bytes = 0
+                    cl = response.headers.get('content-length')
+                    total_size = int(cl) if cl else 0
+                    
+                downloaded = initial_bytes
                 block_size = 1024 * 32  # 32KB chunks
                 
-                with open(dest_path, 'wb') as f:
+                with open(dest_path, mode) as f:
                     while True:
                         chunk = response.read(block_size)
                         if not chunk:
@@ -54,9 +94,13 @@ def download_file(url, dest_path, progress_callback=None):
                         downloaded += len(chunk)
                         if progress_callback and total_size > 0:
                             percent = int((downloaded / total_size) * 100)
+                            # The callback can raise an exception (like Pause) which we let propagate
                             progress_callback(percent, downloaded, total_size)
             return True
         except Exception as e:
+            # If the exception is a pause request, do not retry, just propagate it
+            if 'paused' in str(e).lower() or 'download paused' in str(e).lower():
+                raise e
             if attempt == max_retries:
                 raise e
             logger.warning(f"Download attempt {attempt} failed: {e}. Retrying in 2 seconds...")

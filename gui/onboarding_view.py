@@ -4,7 +4,7 @@ import time
 import subprocess
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QProgressBar, QScrollArea, QFrame
+    QPushButton, QProgressBar, QScrollArea, QFrame, QMessageBox
 )
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 import qtawesome as qta
@@ -19,7 +19,7 @@ from core.installer import (
 logger = logging.getLogger(__name__)
 
 class ScanWorker(QThread):
-    finished = Signal(dict)
+    completed = Signal(dict)
     
     def __init__(self, env_root):
         super().__init__()
@@ -28,20 +28,27 @@ class ScanWorker(QThread):
     def run(self):
         try:
             results = scan_all(self.env_root)
-            self.finished.emit(results)
+            self.completed.emit(results)
         except Exception as e:
             logger.error(f"Error in ScanWorker: {e}")
-            self.finished.emit({})
+            self.completed.emit({})
 
 class InstallWorker(QThread):
     # Signals for UI feedback
     progress = Signal(str, int)  # status message, progress percent
-    finished = Signal(str, bool) # tool name, success status
+    completed = Signal(str, str) # tool name, status ("success", "failed", "paused")
     
     def __init__(self, tool_name, env_root):
         super().__init__()
         self.tool_name = tool_name
         self.env_root = env_root
+        self._paused = False
+        
+    def pause(self):
+        self._paused = True
+        
+    def is_paused_requested(self):
+        return self._paused
         
     def run(self):
         try:
@@ -50,7 +57,7 @@ class InstallWorker(QThread):
             url = DOWNLOAD_URLS.get(self.tool_name)
             if not url:
                 self.progress.emit("Invalid tool URL configuration.", 100)
-                self.finished.emit(self.tool_name, False)
+                self.finished.emit(self.tool_name, "failed")
                 return
             
             temp_dir = os.path.join(self.env_root, "downloads")
@@ -62,6 +69,8 @@ class InstallWorker(QThread):
             self.progress.emit(f"Downloading {filename}...", 5)
             
             def progress_hook(percent, downloaded, total):
+                if self.is_paused_requested():
+                    raise Exception("Download paused by user")
                 p = 5 + int(percent * 0.65)
                 mb_downloaded = downloaded / (1024 * 1024)
                 mb_total = total / (1024 * 1024)
@@ -71,12 +80,17 @@ class InstallWorker(QThread):
                 dest_exe = os.path.join(temp_dir, filename)
                 download_file(url, dest_exe, progress_hook)
                 
+                if self.is_paused_requested():
+                    raise Exception("Download paused by user")
+                    
                 self.progress.emit("Launching Visual C++ Redistributable installer...", 70)
                 os.startfile(dest_exe)
                 
                 self.progress.emit("Waiting for setup completion. Please approve the prompt and click install...", 80)
                 installed = False
                 for _ in range(180):  # Check for up to 3 minutes
+                    if self.is_paused_requested():
+                        raise Exception("Download paused by user")
                     if os.path.exists("C:\\Windows\\System32\\vcruntime140_1.dll"):
                         installed = True
                         break
@@ -84,16 +98,19 @@ class InstallWorker(QThread):
                     
                 if installed:
                     self.progress.emit("Visual C++ Redistributable successfully installed!", 100)
-                    self.finished.emit(self.tool_name, True)
+                    self.completed.emit(self.tool_name, "success")
                 else:
                     self.progress.emit("Visual C++ Redistributable installation skipped or timed out.", 100)
-                    self.finished.emit(self.tool_name, False)
+                    self.completed.emit(self.tool_name, "failed")
                 return
                 
             if self.tool_name == "git":
                 dest_exe = os.path.join(temp_dir, filename)
                 download_file(url, dest_exe, progress_hook)
                 
+                if self.is_paused_requested():
+                    raise Exception("Download paused by user")
+                    
                 self.progress.emit("Launching Git installer...", 70)
                 os.startfile(dest_exe)
                 
@@ -101,6 +118,8 @@ class InstallWorker(QThread):
                 installed = False
                 import shutil as sh_util
                 for _ in range(180):  # Check for up to 3 minutes
+                    if self.is_paused_requested():
+                        raise Exception("Download paused by user")
                     if os.path.exists("C:\\Program Files\\Git\\cmd\\git.exe") or sh_util.which("git"):
                         installed = True
                         break
@@ -113,10 +132,10 @@ class InstallWorker(QThread):
                         update_user_path([git_path])
                         
                     self.progress.emit("Git successfully installed!", 100)
-                    self.finished.emit(self.tool_name, True)
+                    self.completed.emit(self.tool_name, "success")
                 else:
                     self.progress.emit("Git installation skipped or timed out.", 100)
-                    self.finished.emit(self.tool_name, False)
+                    self.completed.emit(self.tool_name, "failed")
                 return
                 
             if self.tool_name == "composer":
@@ -125,6 +144,9 @@ class InstallWorker(QThread):
                 dest_phar = os.path.join(composer_dir, "composer.phar")
                 download_file(url, dest_phar, progress_hook)
                 
+                if self.is_paused_requested():
+                    raise Exception("Download paused by user")
+                    
                 self.progress.emit("Creating composer global command wrapper...", 85)
                 bat_path = os.path.join(composer_dir, "composer.bat")
                 with open(bat_path, "w") as f:
@@ -133,18 +155,21 @@ class InstallWorker(QThread):
                 self.progress.emit("Adding Composer directory to PATH...", 95)
                 update_user_path([composer_dir])
                 self.progress.emit("Composer installation complete!", 100)
-                self.finished.emit(self.tool_name, True)
+                self.completed.emit(self.tool_name, "success")
                 return
                 
             if self.tool_name == "laravel":
                 composer_bat = os.path.join(self.env_root, "composer", "composer.bat")
                 if not os.path.exists(composer_bat):
                     self.progress.emit("Error: Composer must be installed before installing Laravel.", 100)
-                    self.finished.emit(self.tool_name, False)
+                    self.completed.emit(self.tool_name, "failed")
                     return
                     
                 self.progress.emit("Running 'composer global require laravel/installer'...", 30)
                 
+                if self.is_paused_requested():
+                    raise Exception("Download paused by user")
+                    
                 # Copy and update current environment with local php binary location so composer succeeds
                 env = os.environ.copy()
                 php_active = os.path.join(self.env_root, "php", "active")
@@ -177,13 +202,17 @@ class InstallWorker(QThread):
                         update_user_path([composer_global_bin])
                         
                     self.progress.emit("Laravel installation complete!", 100)
-                    self.finished.emit(self.tool_name, True)
+                    self.completed.emit(self.tool_name, "success")
                 else:
                     self.progress.emit(f"Composer error: {res.stderr.strip() or res.stdout.strip()}", 100)
-                    self.finished.emit(self.tool_name, False)
+                    self.completed.emit(self.tool_name, "failed")
                 return
                 
             download_file(url, dest_file, progress_hook)
+            
+            if self.is_paused_requested():
+                raise Exception("Download paused by user")
+                
             self.progress.emit("Extracting package contents...", 75)
             
             target_dir = None
@@ -191,6 +220,10 @@ class InstallWorker(QThread):
                 target_dir = os.path.join(self.env_root, "php", "php-8.2.20")
             elif self.tool_name == "php83":
                 target_dir = os.path.join(self.env_root, "php", "php-8.3.8")
+            elif self.tool_name == "php84":
+                target_dir = os.path.join(self.env_root, "php", "php-8.4.3")
+            elif self.tool_name == "php85":
+                target_dir = os.path.join(self.env_root, "php", "php-8.5.1")
             elif self.tool_name == "nginx":
                 target_dir = os.path.join(self.env_root, "nginx")
             elif self.tool_name == "mysql":
@@ -203,12 +236,16 @@ class InstallWorker(QThread):
                 target_dir = os.path.join(self.env_root, "phpmyadmin")
                 
             extract_and_lift(dest_file, target_dir)
+            
+            if self.is_paused_requested():
+                raise Exception("Download paused by user")
+                
             self.progress.emit("Extraction complete.", 85)
             
             self.progress.emit("Applying post-install configuration scripts...", 90)
             paths_to_add = []
             
-            if self.tool_name in ["php", "php83"]:
+            if self.tool_name in ["php", "php83", "php84", "php85"]:
                 configure_php(target_dir)
                 if self.tool_name == "php":
                     active_junction = os.path.join(self.env_root, "php", "active")
@@ -253,12 +290,17 @@ class InstallWorker(QThread):
                 pass
                 
             self.progress.emit(f"Successfully configured {self.tool_name.upper()}.", 100)
-            self.finished.emit(self.tool_name, True)
+            self.completed.emit(self.tool_name, "success")
             
         except Exception as e:
-            logger.error(f"Installation failed for {self.tool_name}: {e}")
-            self.progress.emit(f"Error installing {self.tool_name}: {e}", 100)
-            self.finished.emit(self.tool_name, False)
+            if "paused" in str(e).lower() or "download paused" in str(e).lower():
+                logger.info(f"Installation paused for {self.tool_name}")
+                self.progress.emit(f"Paused - {self.tool_name.upper()} download.", -1)
+                self.completed.emit(self.tool_name, "paused")
+            else:
+                logger.error(f"Installation failed for {self.tool_name}: {e}")
+                self.progress.emit(f"Error installing {self.tool_name}: {e}", 100)
+                self.completed.emit(self.tool_name, "failed")
 
 
 class OnboardingView(QWidget):
@@ -269,6 +311,8 @@ class OnboardingView(QWidget):
         self.scan_worker = None
         self.last_scan_results = None
         self.install_queue = []
+        self.is_paused = False
+        self.is_cancelling = False
         
         self.init_ui()
         
@@ -329,27 +373,105 @@ class OnboardingView(QWidget):
         self.footer_frame.setFrameShape(QFrame.StyledPanel)
         self.footer_frame.setFrameShadow(QFrame.Raised)
         footer_layout = QHBoxLayout(self.footer_frame)
-        footer_layout.setContentsMargins(10, 10, 10, 10)
+        footer_layout.setContentsMargins(15, 10, 15, 10)
+        footer_layout.setSpacing(20)
         
         self.progress_layout = QVBoxLayout()
+        self.progress_layout.setSpacing(5)
+        
         self.progress_label = QLabel("Idle - All components verified.")
-        self.progress_label.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self.progress_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #94a3b8;")
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(16)
-        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False)
         
         self.progress_layout.addWidget(self.progress_label)
         self.progress_layout.addWidget(self.progress_bar)
-        footer_layout.addLayout(self.progress_layout, 4)
+        footer_layout.addLayout(self.progress_layout, 3)
         
+        # Buttons layout container
+        self.buttons_layout = QHBoxLayout()
+        self.buttons_layout.setSpacing(8)
+        self.buttons_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        # Dynamic installation action button
         self.btn_install_all = QPushButton("Install All Missing")
-        self.btn_install_all.setFixedHeight(35)
-        self.btn_install_all.clicked.connect(self.install_all_missing)
-        footer_layout.addWidget(self.btn_install_all, 1)
+        self.btn_install_all.setFixedHeight(30)
+        self.btn_install_all.setMinimumWidth(140)
+        self.btn_install_all.setMaximumWidth(165)
+        self.btn_install_all.setIcon(qta.icon("fa5s.download"))
+        self.btn_install_all.setIconSize(QSize(12, 12))
+        self.btn_install_all.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self.btn_install_all.clicked.connect(self.handle_install_button_click)
+        self.buttons_layout.addWidget(self.btn_install_all)
+        
+        # Cancel button (hidden by default)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setFixedHeight(30)
+        self.btn_cancel.setMinimumWidth(90)
+        self.btn_cancel.setMaximumWidth(110)
+        self.btn_cancel.setIcon(qta.icon("fa5s.ban"))
+        self.btn_cancel.setIconSize(QSize(11, 11))
+        self.btn_cancel.setStyleSheet("font-size: 11px;")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self.cancel_installation)
+        self.buttons_layout.addWidget(self.btn_cancel)
+        
+        # Check Updates button
+        self.btn_check_updates = QPushButton("Check Updates")
+        self.btn_check_updates.setFixedHeight(30)
+        self.btn_check_updates.setMinimumWidth(120)
+        self.btn_check_updates.setMaximumWidth(140)
+        self.btn_check_updates.setIcon(qta.icon("fa5s.sync-alt"))
+        self.btn_check_updates.setIconSize(QSize(11, 11))
+        self.btn_check_updates.setStyleSheet("font-size: 11px;")
+        self.btn_check_updates.clicked.connect(self.check_updates)
+        self.buttons_layout.addWidget(self.btn_check_updates)
+        
+        footer_layout.addLayout(self.buttons_layout, 2)
         
         layout.addWidget(self.footer_frame)
+        self.refresh_icons()
         
+    def refresh_icons(self):
+        color = self.main_win.get_icon_color()
+        self.btn_cancel.setIcon(qta.icon("fa5s.ban", color=color))
+        self.btn_check_updates.setIcon(qta.icon("fa5s.sync-alt", color=color))
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=color))
+        elif getattr(self, 'is_paused', False):
+            self.btn_install_all.setIcon(qta.icon("fa5s.play", color=color))
+        else:
+            self.btn_install_all.setIcon(qta.icon("fa5s.download", color=color))
+            
+        # Dynamically style thin progress bar based on active theme to prevent Windows clipping bug
+        if self.main_win.theme == "dark":
+            self.progress_bar.setStyleSheet(
+                "QProgressBar {"
+                "  background-color: #1e293b;"
+                "  border: 1px solid #334155;"
+                "  border-radius: 4px;"
+                "}"
+                "QProgressBar::chunk {"
+                "  background-color: #ef4444;"
+                "  border-radius: 3px;"
+                "}"
+            )
+        else:
+            self.progress_bar.setStyleSheet(
+                "QProgressBar {"
+                "  background-color: #e2e8f0;"
+                "  border: 1px solid #cbd5e1;"
+                "  border-radius: 4px;"
+                "}"
+                "QProgressBar::chunk {"
+                "  background-color: #ef4444;"
+                "  border-radius: 3px;"
+                "}"
+            )
+
     def create_tool_card(self, key):
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
@@ -405,10 +527,48 @@ class OnboardingView(QWidget):
         if self.scan_worker and self.scan_worker.isRunning():
             return
             
+        def get_onboarding_state():
+            paths = [
+                self.main_win.env_root,
+                os.path.join(self.main_win.env_root, "php"),
+                os.path.join(self.main_win.env_root, "php", "active"),
+                os.path.join(self.main_win.env_root, "composer"),
+                os.path.join(self.main_win.env_root, "nginx"),
+                os.path.join(self.main_win.env_root, "mariadb"),
+                os.path.join(self.main_win.env_root, "mysql"),
+                os.path.join(self.main_win.env_root, "apache"),
+                os.path.join(self.main_win.env_root, "nodejs"),
+            ]
+            state = []
+            for p in paths:
+                exists = os.path.exists(p)
+                mtime = 0
+                if exists:
+                    try:
+                        mtime = os.path.getmtime(p)
+                    except Exception:
+                        pass
+                state.append((exists, mtime))
+            return tuple(state)
+
+        from core.cache import cache_manager
+        cache_key = f"onboarding_status:{self.main_win.env_root}"
+        cached = cache_manager.get(cache_key, validator_func=get_onboarding_state)
+        
+        if cached is not None:
+            self.on_scan_finished(cached)
+            return
+
         self.progress_label.setText("Scanning system components...")
         self.scan_worker = ScanWorker(self.main_win.env_root)
-        self.scan_worker.finished.connect(self.on_scan_finished)
+        self.scan_worker.completed.connect(lambda r: self.on_scan_finished_and_cache(r, get_onboarding_state))
         self.scan_worker.start()
+
+    def on_scan_finished_and_cache(self, results, get_state_func):
+        from core.cache import cache_manager
+        cache_key = f"onboarding_status:{self.main_win.env_root}"
+        cache_manager.set(cache_key, results, validator_state=get_state_func())
+        self.on_scan_finished(results)
         
     def on_scan_finished(self, results):
         self.last_scan_results = results
@@ -462,13 +622,20 @@ class OnboardingView(QWidget):
         for key in self.tool_keys:
             self.cards[key].property("btn_action").setEnabled(False)
             self.cards[key].property("btn_path").setEnabled(False)
-        self.btn_install_all.setEnabled(False)
+        self.btn_check_updates.setEnabled(False)
+        self.btn_install_all.setEnabled(True)
         
     def unlock_ui_idle(self):
         for key in self.tool_keys:
             self.cards[key].property("btn_action").setEnabled(True)
             self.cards[key].property("btn_path").setEnabled(True)
+        self.btn_check_updates.setEnabled(True)
         self.btn_install_all.setEnabled(True)
+        self.btn_install_all.setText("Install All Missing")
+        self.btn_install_all.setIcon(qta.icon("fa5s.download", color=self.main_win.get_icon_color()))
+        self.btn_cancel.setVisible(False)
+        self.is_paused = False
+        self.is_cancelling = False
         self.refresh_status()
         
     def add_tool_to_path(self, key):
@@ -481,19 +648,64 @@ class OnboardingView(QWidget):
             self.progress_label.setText(msg)
             self.refresh_status()
             
+    def handle_install_button_click(self):
+        if self.worker and self.worker.isRunning():
+            # Currently downloading/configuring, so click means PAUSE
+            self.pause_installation()
+        elif self.is_paused:
+            # Currently paused, so click means RESUME
+            self.resume_installation()
+        else:
+            # Idle, so click means INSTALL ALL MISSING
+            self.install_all_missing()
+            
+    def pause_installation(self):
+        if self.worker and self.worker.isRunning():
+            self.progress_label.setText("Pausing setup...")
+            self.worker.pause()
+            
+    def resume_installation(self):
+        if self.install_queue:
+            self.is_paused = False
+            self.lock_ui_running()
+            self.btn_install_all.setText("Pause")
+            self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=self.main_win.get_icon_color()))
+            self.btn_cancel.setVisible(True)
+            self.process_install_queue()
+            
+    def cancel_installation(self):
+        self.is_cancelling = True
+        self.install_queue.clear()
+        if self.worker and self.worker.isRunning():
+            self.progress_label.setText("Cancelling current installation...")
+            self.worker.pause()  # Signal thread to stop
+        else:
+            self.unlock_ui_idle()
+            self.progress_label.setText("Installation cancelled.")
+            
     def install_single_tool(self, key):
+        self.is_paused = False
+        self.is_cancelling = False
         self.lock_ui_running()
+        self.btn_install_all.setText("Pause")
+        self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=self.main_win.get_icon_color()))
+        self.btn_cancel.setVisible(True)
         self.start_worker_thread(key)
         
     def install_all_missing(self):
         self.progress_label.setText("Preparing installation scan...")
         self.lock_ui_running()
+        self.btn_install_all.setText("Pause")
+        self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=self.main_win.get_icon_color()))
+        self.btn_cancel.setVisible(True)
+        self.is_paused = False
+        self.is_cancelling = False
         
         self.scan_worker = ScanWorker(self.main_win.env_root)
         
         def handle_install_all_scan(results):
             try:
-                self.scan_worker.finished.disconnect()
+                self.scan_worker.completed.disconnect()
             except Exception:
                 pass
             self.on_scan_finished(results)
@@ -508,7 +720,7 @@ class OnboardingView(QWidget):
                 
             self.process_install_queue()
             
-        self.scan_worker.finished.connect(handle_install_all_scan)
+        self.scan_worker.completed.connect(handle_install_all_scan)
         self.scan_worker.start()
         
     def process_install_queue(self):
@@ -524,24 +736,138 @@ class OnboardingView(QWidget):
     def start_worker_thread(self, tool_name):
         self.worker = InstallWorker(tool_name, self.main_win.env_root)
         self.worker.progress.connect(self.on_worker_progress)
-        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.completed.connect(self.on_worker_finished)
         self.worker.start()
         
     def on_worker_progress(self, message, percentage):
-        self.progress_label.setText(message)
-        self.progress_bar.setValue(percentage)
+        if message:
+            self.progress_label.setText(message)
+        if percentage >= 0:
+            self.progress_bar.setValue(percentage)
         
-    def on_worker_finished(self, tool_name, success):
-        if not success:
-            self.progress_label.setText(f"Installation failed for {tool_name.upper()}. See settings logs.")
+    def on_worker_finished(self, tool_name, status):
+        if self.is_cancelling:
             self.unlock_ui_idle()
-            self.install_queue.clear()
+            self.progress_label.setText("Installation cancelled.")
             return
             
+        if status == "paused":
+            # Re-insert tool at the front of queue to allow resume
+            self.install_queue.insert(0, tool_name)
+            self.is_paused = True
+            self.btn_install_all.setText("Resume")
+            self.btn_install_all.setIcon(qta.icon("fa5s.play", color=self.main_win.get_icon_color()))
+            self.btn_cancel.setVisible(True)
+            self.progress_label.setText(f"Paused - {tool_name.upper()} download.")
+            return
+            
+        if status == "failed":
+            self.progress_label.setText(f"Installation failed for {tool_name.upper()}. Continuing next...")
+            # If the user selected to download all missing and something failed, continue to next tool.
+            if self.install_queue:
+                self.process_install_queue()
+            else:
+                self.unlock_ui_idle()
+            return
+            
+        # Success state
         if self.install_queue:
             self.process_install_queue()
         else:
             self.unlock_ui_idle()
+            
+    def get_url_version(self, tool_key):
+        url = DOWNLOAD_URLS.get(tool_key, "")
+        if not url:
+            return None
+        import re
+        if tool_key == "git":
+            match = re.search(r"Git-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key in ["php", "php83", "php84", "php85"]:
+            match = re.search(r"php-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "nginx":
+            match = re.search(r"nginx-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "apache":
+            match = re.search(r"httpd-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "mysql":
+            match = re.search(r"mariadb-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "node":
+            match = re.search(r"node-v([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "phpmyadmin":
+            match = re.search(r"phpMyAdmin-([0-9.]+)", url)
+            return match.group(1) if match else None
+        return None
+
+    def is_version_older(self, current_ver, target_ver):
+        try:
+            import re
+            def parse_version(v_str):
+                cleaned = re.sub(r"[^\d.]", "", v_str).strip(".")
+                return tuple(int(x) for x in cleaned.split(".") if x.isdigit())
+            return parse_version(current_ver) < parse_version(target_ver)
+        except Exception:
+            return False
+
+    def check_updates(self):
+        if self.scan_worker and self.scan_worker.isRunning():
+            return
+        self.progress_label.setText("Scanning system for updates...")
+        self.scan_worker = ScanWorker(self.main_win.env_root)
+        
+        def on_scan_updates_done(results):
+            try:
+                self.scan_worker.completed.disconnect()
+            except Exception:
+                pass
+            self.on_scan_finished(results)
+            self.perform_update_check(results)
+            
+        self.scan_worker.completed.connect(on_scan_updates_done)
+        self.scan_worker.start()
+
+    def perform_update_check(self, results):
+        updates = []
+        for key in self.tool_keys:
+            if key in ["vcredist", "composer", "laravel"]:
+                continue
+            res = results.get(key)
+            if res and res["installed"]:
+                curr_ver = res["version"]
+                target_ver = self.get_url_version(key)
+                if curr_ver and target_ver and self.is_version_older(curr_ver, target_ver):
+                    updates.append((key, curr_ver, target_ver))
+                    
+        if not updates:
+            QMessageBox.information(self, "Check Updates", "All installed components are up to date.")
+            self.progress_label.setText("No updates available.")
+            return
+            
+        msg = "Updates are available for the following components:\n\n"
+        for key, curr, target in updates:
+            msg += f"• {self.tool_display[key][0]}: v{curr} → v{target}\n"
+        msg += "\nWould you like to download and install these updates now?"
+        
+        reply = QMessageBox.question(
+            self,
+            "Updates Available",
+            msg,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.install_queue = [item[0] for item in updates]
+            self.is_paused = False
+            self.is_cancelling = False
+            self.lock_ui_running()
+            self.btn_cancel.setVisible(True)
+            self.btn_install_all.setText("Pause")
+            self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=self.main_win.get_icon_color()))
+            self.process_install_queue()
 
     def check_privileges(self):
         import ctypes

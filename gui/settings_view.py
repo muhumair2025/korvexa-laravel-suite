@@ -189,6 +189,14 @@ class SettingsView(QWidget):
         log_layout.addWidget(self.log_text)
         
         layout.addWidget(log_group)
+        self.refresh_icons()
+        
+    def refresh_icons(self):
+        color = self.main_win.get_icon_color()
+        self.btn_edit_php.setIcon(qta.icon("fa5s.edit", color=color))
+        self.btn_edit_nginx.setIcon(qta.icon("fa5s.edit", color=color))
+        self.btn_edit_my.setIcon(qta.icon("fa5s.edit", color=color))
+        self.btn_edit_apache.setIcon(qta.icon("fa5s.edit", color=color))
         
     def browse_env_root(self):
         dir_path = QFileDialog.getExistingDirectory(

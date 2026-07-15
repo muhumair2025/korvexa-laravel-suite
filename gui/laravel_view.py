@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class LaravelCreateWorker(QThread):
     progress_msg = Signal(str)
-    finished = Signal(bool, str)
+    completed = Signal(bool, str)
 
     def __init__(self, project_name, parent_dir, env_root, starter_kit, db_name, db_user, db_pass):
         super().__init__()
@@ -240,12 +240,12 @@ class LaravelCreateWorker(QThread):
         cmd_npm_b = ["cmd.exe", "/c", "npm", "run", "build"]
         code = run_cmd(cmd_npm_b, project_path)
 
-        self.finished.emit(True, f"Laravel project '{self.project_name}' created successfully!")
+        self.completed.emit(True, f"Laravel project '{self.project_name}' created successfully!")
 
 
 class ArtisanCommandWorker(QThread):
     progress_msg = Signal(str)
-    finished = Signal(bool, str)
+    completed = Signal(bool, str)
 
     def __init__(self, project_path, env_root, command_args):
         super().__init__()
@@ -300,9 +300,9 @@ class ArtisanCommandWorker(QThread):
         self.process = None
         
         if p.returncode == 0:
-            self.finished.emit(True, "Artisan command completed successfully.")
+            self.completed.emit(True, "Artisan command completed successfully.")
         else:
-            self.finished.emit(False, f"Artisan command failed with code {p.returncode}.")
+            self.completed.emit(False, f"Artisan command failed with code {p.returncode}.")
 
 
 class LaravelView(QWidget):
@@ -403,7 +403,7 @@ class LaravelView(QWidget):
         left_lay.addWidget(self.db_group)
 
         self.btn_create = QPushButton(" Scaffold Laravel App")
-        self.btn_create.setIcon(qta.icon("fa5b.laravel"))
+        self.btn_create.setIcon(qta.icon("fa5b.laravel", color="#ffffff"))
         self.btn_create.setFixedHeight(30)
         self.btn_create.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; font-size: 11px;")
         self.btn_create.clicked.connect(self.create_laravel_app)
@@ -531,14 +531,34 @@ class LaravelView(QWidget):
         if not os.path.exists(www_dir):
             return
             
+        def get_mtime():
+            try:
+                return os.path.getmtime(www_dir)
+            except Exception:
+                return 0
+                
+        from core.cache import cache_manager
+        cache_key = f"laravel_projects:{www_dir}"
+        cached_projects = cache_manager.get(cache_key, validator_func=get_mtime)
+        
+        if cached_projects is not None:
+            for name in cached_projects:
+                self.cmb_project.addItem(name)
+            return
+            
+        projects = []
         try:
             for name in os.listdir(www_dir):
                 full_path = os.path.join(www_dir, name)
                 if os.path.isdir(full_path):
                     if os.path.exists(os.path.join(full_path, "artisan")):
-                        self.cmb_project.addItem(name)
+                        projects.append(name)
         except Exception:
             pass
+            
+        cache_manager.set(cache_key, projects, validator_state=get_mtime())
+        for name in projects:
+            self.cmb_project.addItem(name)
 
     def log(self, text):
         # Semantic color syntax highlight parser
@@ -621,7 +641,7 @@ class LaravelView(QWidget):
             db_pass=db_pass
         )
         self.create_worker.progress_msg.connect(self.log)
-        self.create_worker.finished.connect(self.on_creation_finished)
+        self.create_worker.completed.connect(self.on_creation_finished)
         self.create_worker.start()
 
     def on_creation_finished(self, success, msg):
@@ -639,6 +659,10 @@ class LaravelView(QWidget):
                 QMessageBox.Yes | QMessageBox.No
             )
             if confirm == QMessageBox.Yes:
+                if not self.main_win.vhost_view:
+                    from gui.vhost_view import VHostView
+                    self.main_win.vhost_view = VHostView(self.main_win)
+                    self.main_win.tab_containers[3][1].addWidget(self.main_win.vhost_view)
                 self.main_win.vhost_view.txt_domain.setText(domain_name)
                 self.main_win.vhost_view.txt_path.setText(proj_pub)
                 self.main_win.tabs.setCurrentIndex(3)
@@ -661,7 +685,7 @@ class LaravelView(QWidget):
             command_args=args
         )
         self.artisan_worker.progress_msg.connect(self.log)
-        self.artisan_worker.finished.connect(self.on_artisan_finished)
+        self.artisan_worker.completed.connect(self.on_artisan_finished)
         self.artisan_worker.start()
 
     def on_artisan_finished(self, success, msg):

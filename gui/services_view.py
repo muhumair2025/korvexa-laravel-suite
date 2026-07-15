@@ -56,7 +56,7 @@ class StatusWorker(QThread):
 
 
 class ServiceActionWorker(QThread):
-    finished = Signal(str, str, bool, str)  # key, action, success, message
+    completed = Signal(str, str, bool, str)  # key, action, success, message
     
     def __init__(self, key, action, env_root, log_dir):
         super().__init__()
@@ -77,13 +77,13 @@ class ServiceActionWorker(QThread):
                 success, msg = stop_service(self.key, self.env_root)
             else:
                 success, msg = False, "Unknown action"
-            self.finished.emit(self.key, self.action, success, msg)
+            self.completed.emit(self.key, self.action, success, msg)
         except Exception as e:
-            self.finished.emit(self.key, self.action, False, f"Exception: {e}")
+            self.completed.emit(self.key, self.action, False, f"Exception: {e}")
 
 
 class BatchServiceWorker(QThread):
-    finished = Signal(bool, str)  # success, message
+    completed = Signal(bool, str)  # success, message
     log_msg = Signal(str)
     
     def __init__(self, action, env_root, log_dir):
@@ -106,9 +106,9 @@ class BatchServiceWorker(QThread):
                     if status == "Running":
                         self.log_msg.emit(f"Auto-stopping {key}...")
                         stop_service(key, self.env_root)
-            self.finished.emit(True, "Batch operation completed.")
+            self.completed.emit(True, "Batch operation completed.")
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self.completed.emit(False, str(e))
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,11 @@ class ServicesView(QWidget):
         layout.addWidget(console_group)
         
         self.log_event("XAMPP/Laragon control dashboard loaded. Idle.")
+        self.refresh_icons()
+        
+    def refresh_icons(self):
+        color = self.main_win.get_icon_color()
+        self.btn_shell.setIcon(qta.icon("fa5s.terminal", color=color))
         
     def create_service_row(self, row_idx, key):
         # 1. Module Name
@@ -337,7 +342,7 @@ class ServicesView(QWidget):
             action = "start"
             
         worker = ServiceActionWorker(key, action, self.main_win.env_root, self.main_win.log_dir)
-        worker.finished.connect(self.on_action_finished)
+        worker.completed.connect(self.on_action_finished)
         self.active_action_workers[key] = worker
         worker.start()
         
@@ -422,7 +427,7 @@ class ServicesView(QWidget):
         
         self.batch_worker = BatchServiceWorker("start", self.main_win.env_root, self.main_win.log_dir)
         self.batch_worker.log_msg.connect(self.log_event)
-        self.batch_worker.finished.connect(self.on_batch_finished)
+        self.batch_worker.completed.connect(self.on_batch_finished)
         self.batch_worker.start()
         
     def stop_all_services(self):
@@ -433,7 +438,7 @@ class ServicesView(QWidget):
         
         self.batch_worker = BatchServiceWorker("stop", self.main_win.env_root, self.main_win.log_dir)
         self.batch_worker.log_msg.connect(self.log_event)
-        self.batch_worker.finished.connect(self.on_batch_finished)
+        self.batch_worker.completed.connect(self.on_batch_finished)
         self.batch_worker.start()
         
     def on_batch_finished(self, success, msg):

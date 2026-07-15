@@ -47,7 +47,7 @@ def get_mysql_version(exe_path=None):
     cmd = [exe_path, "--version"] if exe_path else ["mysql", "--version"]
     code, stdout, stderr = run_command(cmd, shell=False if exe_path else True)
     output = stdout + stderr
-    match = re.search(r"Distrib\s+([0-9.]+)-MariaDB", output) or re.search(r"Ver\s+([0-9.]+)", output)
+    match = re.search(r"Distrib\s+([0-9.]+)-MariaDB", output) or re.search(r"([0-9.]+)-MariaDB", output) or re.search(r"Ver\s+([0-9.]+)", output)
     if match:
         return match.group(1)
     return None
