@@ -305,12 +305,69 @@ class ArtisanCommandWorker(QThread):
             self.completed.emit(False, f"Artisan command failed with code {p.returncode}.")
 
 
+class ViteBuildWorker(QThread):
+    progress_msg = Signal(str)
+    completed = Signal(bool, str)
+    
+    def __init__(self, project_path, env_root):
+        super().__init__()
+        self.project_path = project_path
+        self.env_root = env_root
+        self.process = None
+        
+    def run(self):
+        import subprocess
+        import os
+        php_active = os.path.join(self.env_root, "php", "active")
+        composer_dir = os.path.join(self.env_root, "composer")
+        node_dir = os.path.join(self.env_root, "nodejs")
+        
+        env = os.environ.copy()
+        env["PATH"] = ";".join([php_active, composer_dir, node_dir]) + ";" + env.get("PATH", "")
+        
+        cmd = ["cmd.exe", "/c", "npm", "run", "build"]
+        self.progress_msg.emit(f"> Running: npm run build")
+        
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        p = subprocess.Popen(
+            cmd,
+            cwd=self.project_path,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        self.process = p
+        
+        while True:
+            line = p.stdout.readline()
+            if not line:
+                break
+            self.progress_msg.emit(line.strip())
+        p.wait()
+        self.process = None
+        
+        if p.returncode == 0:
+            self.completed.emit(True, "NPM asset build completed successfully.")
+        else:
+            self.completed.emit(False, f"NPM asset build failed with code {p.returncode}.")
+
+
 class LaravelView(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_win = main_window
         self.create_worker = None
         self.artisan_worker = None
+        self.build_worker = None
+        self.dev_processes = {}
+        self.vite_log_files = {}
         self.init_ui()
 
     def init_ui(self):
@@ -453,6 +510,35 @@ class LaravelView(QWidget):
         custom_lay.addWidget(self.txt_custom_art)
         custom_lay.addWidget(btn_custom_run)
         left_lay.addLayout(custom_lay)
+
+        # Vite / NPM Dev Tools Card
+        left_lay.addSpacing(10)
+        vite_title = QLabel("Vite / NPM Dev Tools")
+        vite_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444; margin-top: 5px;")
+        left_lay.addWidget(vite_title)
+        
+        vite_lay = QHBoxLayout()
+        self.btn_vite_dev = QPushButton("npm run dev")
+        self.btn_vite_dev.setFixedHeight(24)
+        self.btn_vite_dev.setStyleSheet("font-size: 10px;")
+        self.btn_vite_dev.clicked.connect(self.toggle_vite_dev)
+        
+        self.btn_vite_build = QPushButton("npm run build")
+        self.btn_vite_build.setFixedHeight(24)
+        self.btn_vite_build.setStyleSheet("font-size: 10px;")
+        self.btn_vite_build.clicked.connect(self.run_vite_build)
+        
+        self.btn_vite_logs = QPushButton("Vite Logs")
+        self.btn_vite_logs.setFixedHeight(24)
+        self.btn_vite_logs.setStyleSheet("font-size: 10px;")
+        self.btn_vite_logs.clicked.connect(self.show_vite_logs)
+        
+        vite_lay.addWidget(self.btn_vite_dev)
+        vite_lay.addWidget(self.btn_vite_build)
+        vite_lay.addWidget(self.btn_vite_logs)
+        left_lay.addLayout(vite_lay)
+
+        self.cmb_project.currentTextChanged.connect(self.on_project_changed)
 
         body.addWidget(left_panel, 1)
 
@@ -703,3 +789,142 @@ class LaravelView(QWidget):
         args = shlex.split(cmd)
         self.run_artisan(args)
         self.txt_custom_art.clear()
+
+    def toggle_vite_dev(self):
+        project_name = self.cmb_project.currentText()
+        if not project_name:
+            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project first.")
+            return
+
+        # Check if process is running
+        if project_name in self.dev_processes and self.dev_processes[project_name].poll() is None:
+            # Running -> Stop it!
+            self.log(f"> Stopping Vite dev server for '{project_name}'...")
+            try:
+                proc = self.dev_processes[project_name]
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                proc.wait()
+            except Exception as e:
+                self.log(f"Error stopping process: {e}")
+            
+            if project_name in self.vite_log_files:
+                try:
+                    self.vite_log_files[project_name].close()
+                except Exception:
+                    pass
+                del self.vite_log_files[project_name]
+                
+            del self.dev_processes[project_name]
+            self.log(f"> Vite dev server for '{project_name}' stopped.")
+            self.on_project_changed(project_name)
+        else:
+            # Stopped -> Start it!
+            project_path = os.path.join(self.txt_location.text().strip(), project_name)
+            
+            # Verify package.json contains Vite or dev script
+            pkg_json = os.path.join(project_path, "package.json")
+            if not os.path.exists(pkg_json):
+                QMessageBox.warning(self, "Missing package.json", "No package.json found. Ensure this is a node project and npm install has run.")
+                return
+                
+            self.log(f"> Starting Vite dev server (npm run dev) in background for '{project_name}'...")
+            
+            # Prepare log file
+            log_path = os.path.join(self.main_win.log_dir, f"vite_{project_name}.log")
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "w") as f:
+                    f.write(f"--- Vite Dev Server Log for '{project_name}' started ---\n")
+                self.vite_log_files[project_name] = open(log_path, "a")
+            except Exception as e:
+                QMessageBox.critical(self, "Log Error", f"Failed to create log file: {e}")
+                return
+
+            import subprocess
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            env = os.environ.copy()
+            php_active = os.path.join(self.main_win.env_root, "php", "active")
+            composer_dir = os.path.join(self.main_win.env_root, "composer")
+            node_dir = os.path.join(self.main_win.env_root, "nodejs")
+            env["PATH"] = ";".join([php_active, composer_dir, node_dir]) + ";" + env.get("PATH", "")
+            
+            cmd = ["cmd.exe", "/c", "npm", "run", "dev"]
+            
+            try:
+                p = subprocess.Popen(
+                    cmd,
+                    cwd=project_path,
+                    stdout=self.vite_log_files[project_name],
+                    stderr=self.vite_log_files[project_name],
+                    env=env,
+                    startupinfo=startupinfo,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                self.dev_processes[project_name] = p
+                self.log(f"> Vite dev server running in background. Click 'Vite Logs' to see stdout.")
+                self.on_project_changed(project_name)
+            except Exception as e:
+                self.log(f"Failed to start Vite dev server: {e}")
+                QMessageBox.critical(self, "Launch Error", f"Failed to start npm run dev:\n{e}")
+
+    def run_vite_build(self):
+        project_name = self.cmb_project.currentText()
+        if not project_name:
+            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project from the list first.")
+            return
+
+        project_path = os.path.join(self.txt_location.text().strip(), project_name)
+        self.console.clear()
+        self.progress_bar.setVisible(True)
+        
+        self.build_worker = ViteBuildWorker(
+            project_path=project_path,
+            env_root=self.main_win.env_root
+        )
+        self.build_worker.progress_msg.connect(self.log)
+        self.build_worker.completed.connect(self.on_vite_build_finished)
+        self.build_worker.start()
+
+    def on_vite_build_finished(self, success, msg):
+        self.progress_bar.setVisible(False)
+        if not success:
+            QMessageBox.critical(self, "Build Error", msg)
+        else:
+            self.log(f"\n> {msg}")
+
+    def show_vite_logs(self):
+        project_name = self.cmb_project.currentText()
+        if not project_name:
+            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project from the list first.")
+            return
+
+        log_path = os.path.join(self.main_win.log_dir, f"vite_{project_name}.log")
+        if not os.path.exists(log_path):
+            QMessageBox.information(self, "No Logs", f"No logs found for '{project_name}'. Start the dev server first.")
+            return
+
+        self.console.clear()
+        self.log(f"--- Showing last Vite logs for '{project_name}' ---")
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in lines[-150:]:
+                self.log(line.strip())
+        except Exception as e:
+            self.log(f"Error reading log file: {e}")
+
+    def on_project_changed(self, text):
+        if text in self.dev_processes and self.dev_processes[text].poll() is None:
+            self.btn_vite_dev.setText("Stop Dev")
+            self.btn_vite_dev.setStyleSheet("font-size: 10px; background-color: #ef4444; color: white; font-weight: bold;")
+        else:
+            self.btn_vite_dev.setText("npm run dev")
+            self.btn_vite_dev.setStyleSheet("font-size: 10px;")

@@ -388,7 +388,7 @@ class MainWindow(QMainWindow):
                 
                 # Stop services synchronously on application exit to guarantee cleanup
                 from core.services import stop_service
-                for key in ["nginx", "apache", "php-cgi", "mysql"]:
+                for key in ["nginx", "apache", "php-cgi", "mysql", "mailpit"]:
                     stop_service(key, self.env_root)
                 
                 # Unconditional taskkill fallback for all service processes to leave Task Manager clean
@@ -396,7 +396,7 @@ class MainWindow(QMainWindow):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
-                for proc in ["nginx.exe", "httpd.exe", "mysqld.exe", "php-cgi.exe"]:
+                for proc in ["nginx.exe", "httpd.exe", "mysqld.exe", "php-cgi.exe", "mailpit.exe", "node.exe"]:
                     subprocess.run(
                         ['taskkill', '/F', '/IM', proc], 
                         capture_output=True,
