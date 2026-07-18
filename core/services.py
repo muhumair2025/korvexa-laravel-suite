@@ -88,6 +88,14 @@ SERVICES = {
         "start_args": ["-b", "127.0.0.1:9000"],
         "stop_cmd": None,  # Taskkill is used directly
         "sub_dir": "php/active"
+    },
+    "mailpit": {
+        "exe": "mailpit.exe",
+        "port": 8025,
+        "process_name": "mailpit.exe",
+        "start_args": [],
+        "stop_cmd": None,  # Taskkill is used directly
+        "sub_dir": "mailpit"
     }
 }
 
@@ -99,12 +107,14 @@ def load_custom_ports():
     apache_port = int(settings.value("port_apache", 8081))
     mysql_port = int(settings.value("port_mysql", 3306))
     php_port = int(settings.value("port_php-cgi", 9000))
+    mailpit_port = int(settings.value("port_mailpit", 8025))
     
     SERVICES["nginx"]["port"] = nginx_port
     SERVICES["apache"]["port"] = apache_port
     SERVICES["mysql"]["port"] = mysql_port
     SERVICES["php-cgi"]["port"] = php_port
     SERVICES["php-cgi"]["start_args"] = ["-b", f"127.0.0.1:{php_port}"]
+    SERVICES["mailpit"]["port"] = mailpit_port
 
 load_custom_ports()
 

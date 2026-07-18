@@ -10,6 +10,8 @@ import qtawesome as qta
 
 logger = logging.getLogger(__name__)
 
+from core.version import APP_VERSION
+
 class AboutView(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -72,7 +74,7 @@ class AboutView(QWidget):
         title_vbox.setSpacing(2)
         title_label = QLabel("Laravel Development Suite")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ef4444;")
-        version_label = QLabel("Product Version: 1.0.1 (Stable Release)")
+        version_label = QLabel(f"Product Version: {APP_VERSION} (Stable Release)")
         version_label.setStyleSheet("font-size: 11px; font-weight: bold; color: #94a3b8;")
         title_vbox.addWidget(title_label)
         title_vbox.addWidget(version_label)

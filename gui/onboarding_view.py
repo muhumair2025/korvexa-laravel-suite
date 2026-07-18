@@ -4,7 +4,7 @@ import time
 import subprocess
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QProgressBar, QScrollArea, QFrame, QMessageBox
+    QPushButton, QProgressBar, QScrollArea, QFrame, QMessageBox, QComboBox
 )
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 import qtawesome as qta
@@ -36,7 +36,7 @@ class ScanWorker(QThread):
 class InstallWorker(QThread):
     # Signals for UI feedback
     progress = Signal(str, int)  # status message, progress percent
-    completed = Signal(str, str) # tool name, status ("success", "failed", "paused")
+    completed = Signal(str, str, str) # tool name, status ("success", "failed", "paused"), error_msg
     
     def __init__(self, tool_name, env_root):
         super().__init__()
@@ -98,10 +98,10 @@ class InstallWorker(QThread):
                     
                 if installed:
                     self.progress.emit("Visual C++ Redistributable successfully installed!", 100)
-                    self.completed.emit(self.tool_name, "success")
+                    self.completed.emit(self.tool_name, "success", "")
                 else:
                     self.progress.emit("Visual C++ Redistributable installation skipped or timed out.", 100)
-                    self.completed.emit(self.tool_name, "failed")
+                    self.completed.emit(self.tool_name, "failed", "Visual C++ Redistributable installation skipped or timed out.")
                 return
                 
             if self.tool_name == "git":
@@ -132,10 +132,10 @@ class InstallWorker(QThread):
                         update_user_path([git_path])
                         
                     self.progress.emit("Git successfully installed!", 100)
-                    self.completed.emit(self.tool_name, "success")
+                    self.completed.emit(self.tool_name, "success", "")
                 else:
                     self.progress.emit("Git installation skipped or timed out.", 100)
-                    self.completed.emit(self.tool_name, "failed")
+                    self.completed.emit(self.tool_name, "failed", "Git installation skipped or timed out.")
                 return
                 
             if self.tool_name == "composer":
@@ -155,14 +155,14 @@ class InstallWorker(QThread):
                 self.progress.emit("Adding Composer directory to PATH...", 95)
                 update_user_path([composer_dir])
                 self.progress.emit("Composer installation complete!", 100)
-                self.completed.emit(self.tool_name, "success")
+                self.completed.emit(self.tool_name, "success", "")
                 return
                 
             if self.tool_name == "laravel":
                 composer_bat = os.path.join(self.env_root, "composer", "composer.bat")
                 if not os.path.exists(composer_bat):
                     self.progress.emit("Error: Composer must be installed before installing Laravel.", 100)
-                    self.completed.emit(self.tool_name, "failed")
+                    self.completed.emit(self.tool_name, "failed", "Composer must be installed before installing Laravel.")
                     return
                     
                 self.progress.emit("Running 'composer global require laravel/installer'...", 30)
@@ -202,10 +202,11 @@ class InstallWorker(QThread):
                         update_user_path([composer_global_bin])
                         
                     self.progress.emit("Laravel installation complete!", 100)
-                    self.completed.emit(self.tool_name, "success")
+                    self.completed.emit(self.tool_name, "success", "")
                 else:
                     self.progress.emit(f"Composer error: {res.stderr.strip() or res.stdout.strip()}", 100)
-                    self.completed.emit(self.tool_name, "failed")
+                    err_msg = f"Composer global require failed with return code {res.returncode}.\n\nCommand: {cmd}\n\nStdout:\n{res.stdout.strip()}\n\nStderr:\n{res.stderr.strip()}"
+                    self.completed.emit(self.tool_name, "failed", err_msg)
                 return
                 
             download_file(url, dest_file, progress_hook)
@@ -234,6 +235,8 @@ class InstallWorker(QThread):
                 target_dir = os.path.join(self.env_root, "nodejs")
             elif self.tool_name == "phpmyadmin":
                 target_dir = os.path.join(self.env_root, "phpmyadmin")
+            elif self.tool_name == "mailpit":
+                target_dir = os.path.join(self.env_root, "mailpit")
                 
             extract_and_lift(dest_file, target_dir)
             
@@ -281,6 +284,9 @@ class InstallWorker(QThread):
             elif self.tool_name == "phpmyadmin":
                 pass
                 
+            elif self.tool_name == "mailpit":
+                paths_to_add.append(target_dir)
+                
             if paths_to_add:
                 update_user_path(paths_to_add)
                 
@@ -290,17 +296,17 @@ class InstallWorker(QThread):
                 pass
                 
             self.progress.emit(f"Successfully configured {self.tool_name.upper()}.", 100)
-            self.completed.emit(self.tool_name, "success")
+            self.completed.emit(self.tool_name, "success", "")
             
         except Exception as e:
             if "paused" in str(e).lower() or "download paused" in str(e).lower():
                 logger.info(f"Installation paused for {self.tool_name}")
                 self.progress.emit(f"Paused - {self.tool_name.upper()} download.", -1)
-                self.completed.emit(self.tool_name, "paused")
+                self.completed.emit(self.tool_name, "paused", "")
             else:
                 logger.error(f"Installation failed for {self.tool_name}: {e}")
                 self.progress.emit(f"Error installing {self.tool_name}: {e}", 100)
-                self.completed.emit(self.tool_name, "failed")
+                self.completed.emit(self.tool_name, "failed", str(e))
 
 
 class OnboardingView(QWidget):
@@ -345,7 +351,7 @@ class OnboardingView(QWidget):
         self.scroll_layout.setContentsMargins(5, 5, 5, 5)
         self.scroll_layout.setSpacing(8)
         
-        self.tool_keys = ["vcredist", "git", "php", "composer", "laravel", "mysql", "nginx", "apache", "node", "phpmyadmin"]
+        self.tool_keys = ["vcredist", "git", "php", "composer", "laravel", "mysql", "nginx", "apache", "node", "phpmyadmin", "mailpit"]
         self.tool_display = {
             "vcredist": ("Visual C++ Redistributable 2015-2022", "Required system DLLs for PHP, Apache, and MySQL."),
             "git": ("Git Version Control", "Essential for Laravel package tracking and repository versioning."),
@@ -356,7 +362,8 @@ class OnboardingView(QWidget):
             "nginx": ("Nginx Web Server", "Modern high-concurrency web server."),
             "apache": ("Apache Web Server", "Traditional HTTP web server."),
             "node": ("Node.js & NPM", "Compiles Laravel frontend assets via Vite."),
-            "phpmyadmin": ("phpMyAdmin", "Web GUI for database administration.")
+            "phpmyadmin": ("phpMyAdmin", "Web GUI for database administration."),
+            "mailpit": ("Mailpit SMTP & Webmail", "Testing mail server that catches any sent emails for local web application debugging.")
         }
         
         self.cards = {}
@@ -494,6 +501,27 @@ class OnboardingView(QWidget):
         
         text_layout.addWidget(name_label)
         text_layout.addWidget(desc_label)
+        
+        if key == "node":
+            combo_layout = QHBoxLayout()
+            combo_label = QLabel("Select version:")
+            combo_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.node_combo = QComboBox()
+            self.node_combo.setFixedHeight(22)
+            self.node_combo.setStyleSheet("font-size: 11px;")
+            
+            # LTS Versions
+            self.node_combo.addItems([
+                "Node.js 22 LTS (Recommended)",
+                "Node.js 20 LTS",
+                "Node.js 18 LTS"
+            ])
+            self.node_combo.currentIndexChanged.connect(self.on_node_version_changed)
+            combo_layout.addWidget(combo_label)
+            combo_layout.addWidget(self.node_combo)
+            combo_layout.addStretch()
+            text_layout.addLayout(combo_layout)
+            
         card_layout.addLayout(text_layout, 3)
         
         # Version Tag
@@ -516,12 +544,23 @@ class OnboardingView(QWidget):
         btn_action = QPushButton("Install")
         btn_action.setFixedSize(85, 24)
         btn_action.setStyleSheet("font-weight: bold; font-size: 11px;")
-        btn_action.clicked.connect(lambda: self.install_single_tool(key))
+        btn_action.clicked.connect(lambda checked=False, k=key: self.install_single_tool(k))
         btn_layout.addWidget(btn_action)
         card.setProperty("btn_action", btn_action)
         
         card_layout.addLayout(btn_layout, 1)
         return card
+
+    def on_node_version_changed(self, index):
+        from core.installer import DOWNLOAD_URLS
+        urls = [
+            "https://nodejs.org/dist/v22.12.0/node-v22.12.0-win-x64.zip",
+            "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip",
+            "https://nodejs.org/dist/v18.20.5/node-v18.20.5-win-x64.zip"
+        ]
+        if index < len(urls):
+            DOWNLOAD_URLS["node"] = urls[index]
+            logger.info(f"Node.js download URL updated to: {urls[index]}")
         
     def refresh_status(self):
         if self.scan_worker and self.scan_worker.isRunning():
@@ -590,28 +629,38 @@ class OnboardingView(QWidget):
             if not self.worker or not self.worker.isRunning():
                 btn_action.setEnabled(True)
             
+            try:
+                btn_action.clicked.disconnect()
+            except Exception:
+                pass
+            
             if res["installed"]:
                 if res["in_path"] or key == "phpmyadmin":
                     # Fully configured (Green Check)
                     icon_lbl.setPixmap(qta.icon("fa5s.check-circle", color="#008000").pixmap(QSize(20, 20)))
                     ver_lbl.setText(f"v{res['version']}")
                     ver_lbl.setStyleSheet("color: #008000; font-weight: bold; font-size: 12px;")
-                    btn_action.setText("Reinstall")
                     btn_path.setVisible(False)
                 else:
                     # Installed but not in PATH (Warning Orange)
                     icon_lbl.setPixmap(qta.icon("fa5s.exclamation-circle", color="#b25900").pixmap(QSize(20, 20)))
                     ver_lbl.setText(f"v{res['version']} (No PATH)")
                     ver_lbl.setStyleSheet("color: #b25900; font-weight: bold; font-size: 12px;")
-                    btn_action.setText("Reinstall")
                     btn_path.setVisible(True)
+                
+                btn_action.setText("Uninstall")
+                btn_action.setStyleSheet("font-weight: bold; font-size: 11px; color: #ef4444;")
+                btn_action.clicked.connect(lambda checked=False, k=key: self.uninstall_single_tool(k))
             else:
                 # Not installed (Red Cross)
                 icon_lbl.setPixmap(qta.icon("fa5s.times-circle", color="#d13438").pixmap(QSize(20, 20)))
                 ver_lbl.setText("Not Detected")
                 ver_lbl.setStyleSheet("color: #64748b; font-weight: normal; font-size: 12px;")
-                btn_action.setText("Install")
                 btn_path.setVisible(False)
+                
+                btn_action.setText("Install")
+                btn_action.setStyleSheet("font-weight: bold; font-size: 11px; color: #ffffff;" if self.main_win.theme == "dark" else "font-weight: bold; font-size: 11px;")
+                btn_action.clicked.connect(lambda checked=False, k=key: self.install_single_tool(k))
                 
         if self.worker and self.worker.isRunning():
             self.lock_ui_running()
@@ -691,6 +740,170 @@ class OnboardingView(QWidget):
         self.btn_install_all.setIcon(qta.icon("fa5s.pause", color=self.main_win.get_icon_color()))
         self.btn_cancel.setVisible(True)
         self.start_worker_thread(key)
+
+    def uninstall_single_tool(self, key):
+        tool_name = self.tool_display[key][0]
+        reply = QMessageBox.question(
+            self,
+            "Confirm Uninstall",
+            f"Are you sure you want to uninstall {tool_name}? This will delete its installed files and downloaded packages.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+
+        self.progress_label.setText(f"Uninstalling {tool_name}...")
+        self.progress_bar.setValue(10)
+        
+        # 1. Stop associated service/process if running
+        import subprocess
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        proc_map = {
+            "php": ["php-cgi.exe", "php.exe"],
+            "mysql": ["mysqld.exe"],
+            "nginx": ["nginx.exe"],
+            "apache": ["httpd.exe"],
+            "node": ["node.exe"]
+        }
+        if key in proc_map:
+            for proc in proc_map[key]:
+                try:
+                    subprocess.run(
+                        ['taskkill', '/F', '/IM', proc],
+                        capture_output=True,
+                        startupinfo=startupinfo,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                except Exception:
+                    pass
+                    
+        self.progress_bar.setValue(30)
+        
+        # 2. Delete installed folders
+        import shutil
+        paths_to_delete = []
+        
+        if key == "php":
+            paths_to_delete = [
+                os.path.join(self.main_win.env_root, "php", "php-8.2.20"),
+                os.path.join(self.main_win.env_root, "php", "php-8.3.8"),
+                os.path.join(self.main_win.env_root, "php", "php-8.4.3"),
+                os.path.join(self.main_win.env_root, "php", "php-8.5.1"),
+                os.path.join(self.main_win.env_root, "php", "active")
+            ]
+        elif key == "composer":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "composer")]
+        elif key == "laravel":
+            # Run composer global remove laravel/installer
+            self.progress_label.setText("Removing Laravel Installer globally via Composer...")
+            composer_bat = os.path.join(self.main_win.env_root, "composer", "composer.bat")
+            if os.path.exists(composer_bat):
+                try:
+                    env = os.environ.copy()
+                    php_active = os.path.join(self.main_win.env_root, "php", "active")
+                    env["PATH"] = php_active + ";" + env.get("PATH", "")
+                    subprocess.run(
+                        f'"{composer_bat}" global remove laravel/installer --no-interaction',
+                        shell=True,
+                        capture_output=True,
+                        env=env,
+                        startupinfo=startupinfo,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                except Exception:
+                    pass
+            # Delete bat file
+            appdata = os.environ.get("APPDATA", "")
+            laravel_bat = os.path.join(appdata, "Composer", "vendor", "bin", "laravel.bat")
+            laravel_exe = os.path.join(appdata, "Composer", "vendor", "bin", "laravel")
+            paths_to_delete = [laravel_bat, laravel_exe]
+        elif key == "mysql":
+            paths_to_delete = [
+                os.path.join(self.main_win.env_root, "mariadb"),
+                os.path.join(self.main_win.env_root, "mysql")
+            ]
+        elif key == "nginx":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "nginx")]
+        elif key == "apache":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "apache")]
+        elif key == "node":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "nodejs")]
+        elif key == "phpmyadmin":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "phpmyadmin")]
+        elif key == "mailpit":
+            paths_to_delete = [os.path.join(self.main_win.env_root, "mailpit")]
+            
+        # Execute directory deletion with retry/delay to prevent Windows locking issues
+        for path in paths_to_delete:
+            if os.path.exists(path):
+                for attempt in range(5):
+                    try:
+                        if os.path.isdir(path) and not os.path.islink(path):
+                            shutil.rmtree(path)
+                        else:
+                            os.remove(path)
+                        break
+                    except Exception:
+                        time.sleep(0.2)
+                        
+        self.progress_bar.setValue(70)
+        
+        # 3. Delete downloaded zips/exes
+        downloads_dir = os.path.join(self.main_win.env_root, "downloads")
+        if os.path.exists(downloads_dir):
+            filenames_to_delete = []
+            if key == "vcredist":
+                filenames_to_delete.append("vc_redist.x64.exe")
+            elif key == "git":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("git-") and f.lower().endswith(".exe"):
+                        filenames_to_delete.append(f)
+            elif key == "php":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("php-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "composer":
+                filenames_to_delete.append("composer.phar")
+            elif key == "mysql":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("mariadb-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "nginx":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("nginx-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "apache":
+                for f in os.listdir(downloads_dir):
+                    if (f.lower().startswith("httpd-") or f.lower().startswith("apache-")) and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "node":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("node-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "phpmyadmin":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("phpmyadmin-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+            elif key == "mailpit":
+                for f in os.listdir(downloads_dir):
+                    if f.lower().startswith("mailpit-") and f.lower().endswith(".zip"):
+                        filenames_to_delete.append(f)
+                        
+            for f in filenames_to_delete:
+                fpath = os.path.join(downloads_dir, f)
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                    except Exception:
+                        pass
+                        
+        self.progress_bar.setValue(100)
+        self.progress_label.setText(f"Successfully uninstalled {tool_name}.")
+        self.refresh_status()
         
     def install_all_missing(self):
         self.progress_label.setText("Preparing installation scan...")
@@ -745,7 +958,7 @@ class OnboardingView(QWidget):
         if percentage >= 0:
             self.progress_bar.setValue(percentage)
         
-    def on_worker_finished(self, tool_name, status):
+    def on_worker_finished(self, tool_name, status, error_msg=""):
         if self.is_cancelling:
             self.unlock_ui_idle()
             self.progress_label.setText("Installation cancelled.")
@@ -762,7 +975,12 @@ class OnboardingView(QWidget):
             return
             
         if status == "failed":
-            self.progress_label.setText(f"Installation failed for {tool_name.upper()}. Continuing next...")
+            self.progress_label.setText(f"Installation failed for {tool_name.upper()}.")
+            QMessageBox.critical(
+                self, 
+                "Installation Failed", 
+                f"Failed to install {self.tool_display.get(tool_name, (tool_name, ''))[0]}.\n\nError Details:\n{error_msg}"
+            )
             # If the user selected to download all missing and something failed, continue to next tool.
             if self.install_queue:
                 self.process_install_queue()
@@ -801,6 +1019,9 @@ class OnboardingView(QWidget):
             return match.group(1) if match else None
         elif tool_key == "phpmyadmin":
             match = re.search(r"phpMyAdmin-([0-9.]+)", url)
+            return match.group(1) if match else None
+        elif tool_key == "mailpit":
+            match = re.search(r"v([0-9.]+)", url)
             return match.group(1) if match else None
         return None
 

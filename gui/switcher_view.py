@@ -510,14 +510,14 @@ class SwitcherView(QWidget):
         self.dl_status_lbl.setText(msg)
         self.dl_progress.setValue(percentage)
         
-    def on_dl_finished(self, tool_name, status):
+    def on_dl_finished(self, tool_name, status, error_msg=""):
         self.dl_progress.setVisible(False)
         self.dl_status_lbl.setText("")
         self.refresh_status()
         if status == "success":
             QMessageBox.information(self, "PHP Download Complete", f"{tool_name.upper()} downloaded and registered successfully. You can select it in the dropdown.")
         else:
-            QMessageBox.critical(self, "Download Error", f"Could not download {tool_name.upper()}. Please inspect settings logs.")
+            QMessageBox.critical(self, "Download Error", f"Could not download {tool_name.upper()}.\n\nDetails: {error_msg}")
             
     def load_extensions(self):
         while self.scroll_layout.count() > 1:

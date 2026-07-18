@@ -97,6 +97,15 @@ def get_git_version(exe_path=None):
         return match.group(1)
     return "Detected"
 
+def get_mailpit_version(exe_path=None):
+    cmd = [exe_path, "version"] if exe_path else ["mailpit", "version"]
+    code, stdout, stderr = run_command(cmd, shell=False if exe_path else True)
+    output = stdout + stderr
+    match = re.search(r"v([0-9.]+)", output)
+    if match:
+        return match.group(1)
+    return "Detected"
+
 def detect_tool(name, env_root=None):
     """Detects if a tool is installed globally (in PATH) or locally under env_root.
     
@@ -206,6 +215,10 @@ def detect_tool(name, env_root=None):
             if os.path.exists(pma_index):
                 local_path = pma_index
                 local_version = "5.2.1"
+        elif name == "mailpit":
+            mailpit_exe = os.path.join(env_root, "mailpit", "mailpit.exe")
+            if os.path.exists(mailpit_exe):
+                local_path = mailpit_exe
     
     path_found = global_path or local_path
     version = None
@@ -229,6 +242,8 @@ def detect_tool(name, env_root=None):
             version = get_node_version(path_found)
         elif name == "phpmyadmin":
             version = local_version or "Detected"
+        elif name == "mailpit":
+            version = get_mailpit_version(path_found)
             
     # Check if this tool is configured in system environment PATH
     in_path = False
@@ -255,7 +270,7 @@ def scan_all(env_root=None):
         reload_path_in_memory()
     except Exception:
         pass
-    tools = ["vcredist", "git", "php", "composer", "laravel", "mysql", "nginx", "apache", "node", "phpmyadmin"]
+    tools = ["vcredist", "git", "php", "composer", "laravel", "mysql", "nginx", "apache", "node", "phpmyadmin", "mailpit"]
     results = {}
     for tool in tools:
         results[tool] = detect_tool(tool, env_root)

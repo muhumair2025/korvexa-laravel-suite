@@ -1,7 +1,10 @@
 import os
 import logging
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QTabWidget,
+    QDialog, QTextBrowser, QPushButton, QProgressBar, QLabel, QHBoxLayout, QMessageBox
+)
+from PySide6.QtCore import Qt, QSettings, QThread, Signal
 
 # Import views
 from gui.onboarding_view import OnboardingView
@@ -52,6 +55,11 @@ class MainWindow(QMainWindow):
         self.is_exiting = False
         self.init_ui()
         self.init_tray()
+        
+        # Check for updates in the background
+        self.update_worker = UpdateCheckWorker()
+        self.update_worker.update_available.connect(self.show_update_dialog)
+        self.update_worker.start()
         
     def init_ui(self):
         self.main_widget = QWidget()
@@ -276,6 +284,91 @@ class MainWindow(QMainWindow):
         # Refresh current tab
         self.on_tab_changed(self.tabs.currentIndex())
         
+    def stop_all_threads(self):
+        logger.info("Stopping all background threads...")
+        
+        # 1. Stop ServicesView workers
+        if getattr(self, 'services_view', None) and self.services_view is not None:
+            try:
+                if getattr(self.services_view, 'status_worker', None):
+                    self.services_view.status_worker.stop()
+                    self.services_view.status_worker.wait(1000)
+                if getattr(self.services_view, 'batch_worker', None) and self.services_view.batch_worker.isRunning():
+                    self.services_view.batch_worker.wait(1000)
+                for key, worker in list(getattr(self.services_view, 'active_action_workers', {}).items()):
+                    if worker.isRunning():
+                        worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning services_view threads: {e}")
+
+        # 2. Stop SwitcherView workers
+        if getattr(self, 'switcher_view', None) and self.switcher_view is not None:
+            try:
+                for attr in ['worker', 'scan_worker', 'switch_worker', 'restart_worker']:
+                    worker = getattr(self.switcher_view, attr, None)
+                    if worker and worker.isRunning():
+                        try:
+                            if hasattr(worker, 'stop'):
+                                worker.stop()
+                        except Exception:
+                            pass
+                        worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning switcher_view threads: {e}")
+
+        # 3. Stop VHostView workers
+        if getattr(self, 'vhost_view', None) and self.vhost_view is not None:
+            try:
+                worker = getattr(self.vhost_view, 'restart_worker', None)
+                if worker and worker.isRunning():
+                    worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning vhost_view threads: {e}")
+
+        # 4. Stop LaravelView workers
+        if getattr(self, 'laravel_view', None) and self.laravel_view is not None:
+            try:
+                for attr in ['create_worker', 'artisan_worker']:
+                    worker = getattr(self.laravel_view, attr, None)
+                    if worker and worker.isRunning():
+                        if hasattr(worker, 'current_process') and worker.current_process is not None:
+                            try:
+                                worker.current_process.terminate()
+                            except Exception:
+                                pass
+                        worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning laravel_view threads: {e}")
+
+        # 5. Stop DatabaseView workers
+        if getattr(self, 'database_view', None) and self.database_view is not None:
+            try:
+                worker = getattr(self.database_view, 'query_worker', None)
+                if worker and worker.isRunning():
+                    worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning database_view threads: {e}")
+
+        # 6. Stop OnboardingView workers
+        if getattr(self, 'onboarding_view', None) and self.onboarding_view is not None:
+            try:
+                for attr in ['scan_worker', 'worker']:
+                    worker = getattr(self.onboarding_view, attr, None)
+                    if worker and worker.isRunning():
+                        try:
+                            if hasattr(worker, 'pause'):
+                                worker.pause()
+                        except Exception:
+                            pass
+                        if hasattr(worker, 'current_process') and worker.current_process is not None:
+                            try:
+                                worker.current_process.terminate()
+                            except Exception:
+                                pass
+                        worker.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error cleaning onboarding_view threads: {e}")
+
     def closeEvent(self, event):
         """Minimize to tray instead of closing, unless is_exiting is flagged."""
         from PySide6.QtWidgets import QSystemTrayIcon
@@ -290,6 +383,9 @@ class MainWindow(QMainWindow):
             )
         else:
             try:
+                # Stop all background threads gracefully first
+                self.stop_all_threads()
+                
                 # Stop services synchronously on application exit to guarantee cleanup
                 from core.services import stop_service
                 for key in ["nginx", "apache", "php-cgi", "mysql"]:
@@ -309,7 +405,17 @@ class MainWindow(QMainWindow):
                     )
             except Exception as e:
                 logger.warning(f"Error stopping services during closeEvent: {e}")
+            
+            try:
+                self.settings.sync()
+            except Exception:
+                pass
+                
             event.accept()
+            
+            # Hard exit the process to prevent any PySide6/QThread teardown deadlocks in Python interpreter
+            import os
+            os._exit(0)
 
     def init_tray(self):
         from PySide6.QtWidgets import QSystemTrayIcon, QMenu
@@ -391,3 +497,276 @@ class MainWindow(QMainWindow):
         if hasattr(sys, '_MEIPASS'):
             return os.path.join(sys._MEIPASS, "assets", "app_logo.ico")
         return os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "app_logo.ico")
+
+    def show_update_dialog(self, update_info):
+        dialog = UpdateDialog(update_info, self)
+        if dialog.exec() == QDialog.Accepted:
+            progress_dialog = UpdateProgressDialog(update_info["download_url"], self)
+            progress_dialog.exec()
+
+class UpdateCheckWorker(QThread):
+    update_available = Signal(dict)
+    
+    def run(self):
+        try:
+            import urllib.request
+            import json
+            import ssl
+            context = ssl._create_unverified_context()
+            
+            url = "https://api.github.com/repos/muhumair2025/korvexa-laravel-suite/releases/latest"
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            with urllib.request.urlopen(req, timeout=10, context=context) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                
+            tag_name = data.get("tag_name", "").strip()
+            latest_version = tag_name.lstrip("vV")
+            
+            # Use centralized APP_VERSION
+            from core.version import APP_VERSION
+            current_version = APP_VERSION
+            
+            def parse_version(v_str):
+                return tuple(int(x) for x in v_str.split(".") if x.isdigit())
+                
+            if parse_version(latest_version) > parse_version(current_version):
+                download_url = None
+                assets = data.get("assets", [])
+                for asset in assets:
+                    name = asset.get("name", "").lower()
+                    if name.endswith(".exe") or name.endswith(".zip"):
+                        download_url = asset.get("browser_download_url")
+                        break
+                if not download_url:
+                    download_url = data.get("html_url")
+                    
+                update_info = {
+                    "version": latest_version,
+                    "title": data.get("name", f"Version {latest_version}"),
+                    "description": data.get("body", "No description provided."),
+                    "download_url": download_url,
+                    "tag": tag_name
+                }
+                self.update_available.emit(update_info)
+        except Exception as e:
+            logger.debug(f"Failed to check for updates: {e}")
+
+class UpdateDialog(QDialog):
+    def __init__(self, update_info, parent=None):
+        super().__init__(parent)
+        self.update_info = update_info
+        self.setWindowTitle("Software Update Available")
+        self.resize(500, 400)
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(12)
+        
+        title_lbl = QLabel("A new version of Laravel Development Suite is available!")
+        title_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #ef4444;")
+        layout.addWidget(title_lbl)
+        
+        from core.version import APP_VERSION
+        info_lbl = QLabel(f"New Version: {update_info['tag']} (Current Version: v{APP_VERSION})")
+        info_lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(info_lbl)
+        
+        desc_lbl = QLabel("Release Notes:")
+        desc_lbl.setStyleSheet("font-weight: bold; font-size: 11px;")
+        layout.addWidget(desc_lbl)
+        
+        self.notes_browser = QTextBrowser()
+        self.notes_browser.setHtml(self.markdown_to_html(update_info["description"]))
+        layout.addWidget(self.notes_browser)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.btn_close = QPushButton("Skip Version")
+        self.btn_close.setFixedHeight(28)
+        self.btn_close.clicked.connect(self.reject)
+        
+        self.btn_update = QPushButton("Update Now")
+        self.btn_update.setFixedHeight(28)
+        self.btn_update.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_update.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addWidget(self.btn_update)
+        layout.addLayout(btn_layout)
+        
+    def markdown_to_html(self, text):
+        import re
+        # Escape HTML characters
+        html = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        
+        # Replace code blocks
+        html = re.sub(r"```(.*?)\n(.*?)```", r"<pre style='background-color:#1e293b; padding:8px; border-radius:4px;'><code>\2</code></pre>", html, flags=re.DOTALL)
+        html = re.sub(r"`(.*?)`", r"<code style='background-color:#1e293b; padding:2px 4px; border-radius:3px;'>\1</code>", html)
+        
+        lines = html.split("\n")
+        formatted_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    formatted_lines.append("</ul>")
+                    in_list = False
+                formatted_lines.append("<br>")
+                continue
+                
+            # Headers
+            header_match = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if header_match:
+                if in_list:
+                    formatted_lines.append("</ul>")
+                    in_list = False
+                level = len(header_match.group(1))
+                content = header_match.group(2)
+                # handle bold inside header
+                content = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", content)
+                formatted_lines.append(f"<h{level} style='margin-top:10px; margin-bottom:5px; color:#ef4444;'>{content}</h{level}>")
+                continue
+                
+            # Lists
+            list_match = re.match(r"^([-\*]|\d+\.)\s+(.*)$", line)
+            if list_match:
+                if not in_list:
+                    formatted_lines.append("<ul style='margin-left: 15px;'>")
+                    in_list = True
+                content = list_match.group(2)
+                # handle bold inside list
+                content = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", content)
+                formatted_lines.append(f"<li style='margin-bottom: 3px;'>{content}</li>")
+                continue
+                
+            # If we were in list and line is not a list item
+            if in_list:
+                formatted_lines.append("</ul>")
+                in_list = False
+                
+            # Bold
+            line = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", line)
+            # Italics
+            line = re.sub(r"\*(.*?)\*", r"<i>\1</i>", line)
+            
+            formatted_lines.append(f"<p style='margin: 2px 0;'>{line}</p>")
+            
+        if in_list:
+            formatted_lines.append("</ul>")
+            
+        full_html = "\n".join(formatted_lines)
+        return f"<div style='font-family: sans-serif; font-size: 11px; line-height: 1.4;'>{full_html}</div>"
+
+class UpdateProgressDialog(QDialog):
+    def __init__(self, download_url, parent=None):
+        super().__init__(parent)
+        self.download_url = download_url
+        self.setWindowTitle("Downloading Update")
+        self.setFixedSize(350, 100)
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        self.lbl = QLabel("Downloading update installer...")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        
+        layout.addWidget(self.lbl)
+        layout.addWidget(self.progress)
+        
+        self.worker = UpdateDownloaderWorker(download_url)
+        self.worker.progress.connect(self.on_progress)
+        self.worker.completed.connect(self.on_completed)
+        self.worker.start()
+        
+    def on_progress(self, percent, msg):
+        self.progress.setValue(percent)
+        self.lbl.setText(msg)
+        
+    def on_completed(self, success, file_path):
+        if success and file_path and os.path.exists(file_path):
+            if file_path.lower().endswith(".html") or not (file_path.lower().endswith(".exe") or file_path.lower().endswith(".zip")):
+                import webbrowser
+                webbrowser.open(self.download_url)
+                from PySide6.QtWidgets import QApplication
+                QApplication.quit()
+                return
+                
+            self.lbl.setText("Closing app and launching installer...")
+            
+            # Stop all services to avoid locks on dependencies/files
+            try:
+                import subprocess
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                for proc in ["nginx.exe", "httpd.exe", "mysqld.exe", "php-cgi.exe", "mailpit.exe"]:
+                    subprocess.run(
+                        ['taskkill', '/F', '/IM', proc],
+                        capture_output=True,
+                        startupinfo=startupinfo,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+            except Exception:
+                pass
+                
+            try:
+                os.startfile(file_path)
+            except Exception:
+                import subprocess
+                subprocess.Popen([file_path], shell=True)
+                
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()
+        else:
+            QMessageBox.critical(self, "Update Error", f"Failed to download update installer: {file_path}")
+            self.reject()
+
+class UpdateDownloaderWorker(QThread):
+    progress = Signal(int, str)
+    completed = Signal(bool, str)
+    
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        
+    def run(self):
+        try:
+            import urllib.request
+            import tempfile
+            import ssl
+            context = ssl._create_unverified_context()
+            
+            filename = self.url.split("/")[-1] or "update_setup.exe"
+            temp_dir = tempfile.gettempdir()
+            dest_path = os.path.join(temp_dir, filename)
+            
+            req = urllib.request.Request(
+                self.url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            with urllib.request.urlopen(req, timeout=30, context=context) as response:
+                total_size = int(response.info().get('Content-Length', 0))
+                downloaded = 0
+                block_size = 8192
+                
+                with open(dest_path, 'wb') as f:
+                    while True:
+                        block = response.read(block_size)
+                        if not block:
+                            break
+                        f.write(block)
+                        downloaded += len(block)
+                        if total_size > 0:
+                            percent = int(downloaded * 100 / total_size)
+                            self.progress.emit(percent, f"Downloaded {downloaded/(1024*1024):.1f} MB / {total_size/(1024*1024):.1f} MB")
+                            
+            self.completed.emit(True, dest_path)
+        except Exception as e:
+            self.completed.emit(False, str(e))

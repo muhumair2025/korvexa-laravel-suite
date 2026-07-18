@@ -23,8 +23,9 @@ DOWNLOAD_URLS = {
     "nginx": "https://nginx.org/download/nginx-1.24.0.zip",
     "apache": "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.66-251206-win64-VS17.zip",
     "mysql": "https://archive.mariadb.org/mariadb-11.2.2/winx64-packages/mariadb-11.2.2-winx64.zip",
-    "node": "https://nodejs.org/dist/v20.11.1/node-v20.11.1-win-x64.zip",
-    "phpmyadmin": "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip"
+    "node": "https://nodejs.org/dist/v22.12.0/node-v22.12.0-win-x64.zip",
+    "phpmyadmin": "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.zip",
+    "mailpit": "https://github.com/axllent/mailpit/releases/download/v1.20.1/mailpit-windows-amd64.zip"
 }
 
 def download_file(url, dest_path, progress_callback=None):

@@ -30,7 +30,7 @@ class StatusWorker(QThread):
             try:
                 running_procs = get_running_processes_ctypes()
                 results = {}
-                for name in ["nginx", "apache", "mysql", "php-cgi"]:
+                for name in ["nginx", "apache", "mysql", "php-cgi", "mailpit"]:
                     srv = SERVICES[name]
                     port_active = is_port_in_use(srv["port"])
                     proc_active = srv["process_name"].lower() in running_procs
@@ -95,13 +95,17 @@ class BatchServiceWorker(QThread):
     def run(self):
         try:
             if self.action == "start":
-                for key in ["mysql", "php-cgi", "nginx"]:
+                for key in ["mysql", "php-cgi", "nginx", "mailpit"]:
+                    if key == "mailpit":
+                        exe_path = os.path.join(self.env_root, "mailpit", "mailpit.exe")
+                        if not os.path.exists(exe_path):
+                            continue
                     status = get_service_status(key, self.env_root)
                     if status == "Stopped":
                         self.log_msg.emit(f"Auto-launching {key}...")
                         start_service(key, self.env_root, self.log_dir)
             else:
-                for key in ["nginx", "apache", "php-cgi", "mysql"]:
+                for key in ["nginx", "apache", "php-cgi", "mysql", "mailpit"]:
                     status = get_service_status(key, self.env_root)
                     if status == "Running":
                         self.log_msg.emit(f"Auto-stopping {key}...")
@@ -188,18 +192,20 @@ class ServicesView(QWidget):
             lbl.setStyleSheet("font-weight: bold; color: #555555; font-size: 11px; border-bottom: 1px solid #cccccc; padding-bottom: 4px;")
             self.grid.addWidget(lbl, 0, col_idx)
             
-        self.service_keys = ["nginx", "apache", "mysql", "php-cgi"]
+        self.service_keys = ["nginx", "apache", "mysql", "php-cgi", "mailpit"]
         self.service_names = {
             "nginx": "Nginx Web Server",
             "apache": "Apache Web Server",
             "mysql": "MariaDB Database",
-            "php-cgi": "PHP FastCGI Gateway"
+            "php-cgi": "PHP FastCGI Gateway",
+            "mailpit": "Mailpit SMTP & Webmail"
         }
         self.service_ports = {
             "nginx": 8080,
             "apache": 8081,
             "mysql": 3306,
-            "php-cgi": 9000
+            "php-cgi": 9000,
+            "mailpit": 8025
         }
         
         self.rows = {}
@@ -298,7 +304,8 @@ class ServicesView(QWidget):
             btn_action = widgets["btn_action"]
             btn_admin = widgets["btn_admin"]
             
-            port = self.service_ports[key]
+            from core.services import SERVICES
+            port = SERVICES.get(key, {}).get("port", self.service_ports.get(key, 0))
             
             if status == "Running":
                 if "Running" not in status_lbl.text():
@@ -367,7 +374,8 @@ class ServicesView(QWidget):
         urls = {
             "nginx": f"http://localhost:{nginx_port}",
             "apache": f"http://localhost:{apache_port}",
-            "mysql": f"http://localhost:{nginx_port}/phpmyadmin"
+            "mysql": f"http://localhost:{nginx_port}/phpmyadmin",
+            "mailpit": f"http://localhost:{SERVICES.get('mailpit', {}).get('port', 8025)}"
         }
         url = urls.get(key)
         if url:
@@ -379,6 +387,14 @@ class ServicesView(QWidget):
         self.open_admin_panel("mysql")
             
     def open_config_file(self, key):
+        if key == "mailpit":
+            QMessageBox.information(
+                self, 
+                "Mailpit Configuration", 
+                "Mailpit does not require a configuration file. It is preconfigured to capture emails locally on SMTP port 1025, with a Web UI on port 8025."
+            )
+            return
+            
         path_map = {
             "php-cgi": os.path.join(self.main_win.env_root, "php", "active", "php.ini"),
             "nginx": os.path.join(self.main_win.env_root, "nginx", "conf", "nginx.conf"),
@@ -458,7 +474,9 @@ class ServicesView(QWidget):
     def open_environment_shell(self):
         self.log_event("Launching local environment PowerShell session...")
         try:
-            cmd = ['powershell.exe', '-NoExit', '-Command', f"cd '{self.main_win.env_root}'"]
+            import shutil
+            powershell_exe = shutil.which("powershell.exe") or os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+            cmd = [powershell_exe, '-NoExit', '-Command', f"cd '{self.main_win.env_root}'"]
             subprocess.Popen(cmd)
         except Exception as e:
             QMessageBox.critical(self, "Shell Error", f"Failed to launch PowerShell session: {e}")
