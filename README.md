@@ -11,10 +11,9 @@ A lightweight, lightning-fast developer stack manager for local **PHP & Laravel*
 
 ## 📥 Download Installer
 
-You can download the compiled standalone installer for Windows directly from this repository:
+You can obtain the latest stable release of the Laravel Development Suite from the official GitHub Releases page:
 
-* **[Download Installer (v1.0.0)](Installer/LaravelSuite-Setup-v1.0.0.exe)** (Opens the installer file page on GitHub)
-* **[Direct Download (v1.0.0)](https://github.com/muhumair2025/korvexa-laravel-suite/raw/main/Installer/LaravelSuite-Setup-v1.0.0.exe)** (Downloads the installer directly)
+👉 **[Download Latest Release](https://github.com/muhumair2025/korvexa-laravel-suite/releases)**
 
 ---
 
@@ -37,7 +36,7 @@ You can download the compiled standalone installer for Windows directly from thi
 - **Administrator privileges** (Required for configuring Windows services, environment variables, hosts records, and directory junctions).
 
 ### 2. Run the Installer
-1. Download **[LaravelSuite-Setup-v1.0.0.exe](Installer/LaravelSuite-Setup-v1.0.0.exe)**.
+1. Download the latest setup executable (e.g. `LaravelSuite-Setup-v1.0.0.exe`) from the [GitHub Releases page](https://github.com/muhumair2025/korvexa-laravel-suite/releases).
 2. Run the installer (requires Windows UAC admin permission).
 3. Follow the wizard steps to complete the installation.
 4. Launch **Laravel Suite** from the Desktop or Start Menu.

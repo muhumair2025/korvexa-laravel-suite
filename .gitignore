@@ -27,8 +27,8 @@ MANIFEST
 # PyInstaller binaries build directory
 dist/
 
-# NOTE: Do NOT ignore the Installer/ directory since we want to place
-# the Windows installer (LaravelSuite-Setup-v1.0.0.exe) in the repo.
+# Ignore the Installer directory since installer binaries will be published via GitHub Releases manually
+Installer/
 
 # Environments & virtualenvs
 .env
