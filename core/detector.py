@@ -161,13 +161,13 @@ def detect_tool(name, env_root=None):
         elif name == "git":
             global_path = shutil.which("git")
             local_git = "C:\\Program Files\\Git\\cmd\\git.exe"
-            path_found = global_path or (local_git if os.path.exists(local_git) else None)
+            local_path = local_git if os.path.exists(local_git) else None
             is_global = global_path is not None
         elif name == "laravel":
             global_path = shutil.which("laravel")
             appdata = os.environ.get("APPDATA", "")
             local_composer_laravel = os.path.join(appdata, "Composer", "vendor", "bin", "laravel.bat")
-            path_found = global_path or (local_composer_laravel if os.path.exists(local_composer_laravel) else None)
+            local_path = local_composer_laravel if os.path.exists(local_composer_laravel) else None
             is_global = global_path is not None
         elif name == "mysql":
             mysql_exe = os.path.join(env_root, "mariadb", "bin", "mysql.exe")
@@ -220,7 +220,13 @@ def detect_tool(name, env_root=None):
             if os.path.exists(mailpit_exe):
                 local_path = mailpit_exe
     
-    path_found = global_path or local_path
+    is_service_tool = name in ["php", "composer", "mysql", "nginx", "apache", "node", "phpmyadmin", "mailpit"]
+    if is_service_tool:
+        path_found = local_path
+        is_global = False
+    else:
+        path_found = global_path or local_path
+        
     version = None
     
     if path_found:
@@ -261,7 +267,8 @@ def detect_tool(name, env_root=None):
         "global": is_global,
         "in_path": in_path,
         "path": path_found,
-        "version": version or "Unknown"
+        "version": version or "Unknown",
+        "global_path": global_path
     }
 
 def scan_all(env_root=None):

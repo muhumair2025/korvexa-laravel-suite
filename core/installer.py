@@ -32,9 +32,12 @@ def download_file(url, dest_path, progress_callback=None):
     """Downloads a file with support for resuming (HTTP Range) and retries."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     
-    # Bypass local certificate stores (avoids SSL: CERTIFICATE_VERIFY_FAILED on Windows)
-    context = ssl._create_unverified_context()
-    
+    # Try using default system SSL context first, fall back to unverified if verification fails
+    try:
+        context = ssl.create_default_context()
+    except Exception:
+        context = ssl._create_unverified_context()
+        
     initial_bytes = 0
     if os.path.exists(dest_path):
         initial_bytes = os.path.getsize(dest_path)
@@ -52,6 +55,14 @@ def download_file(url, dest_path, progress_callback=None):
                 
             try:
                 response = urllib.request.urlopen(req, timeout=30, context=context)
+            except urllib.error.URLError as ue:
+                # Fall back to unverified context if certificate verification failed
+                if isinstance(ue.reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(ue.reason):
+                    logger.warning("SSL verification failed. Retrying download with unverified SSL context...")
+                    unverified_context = ssl._create_unverified_context()
+                    response = urllib.request.urlopen(req, timeout=30, context=unverified_context)
+                else:
+                    raise ue
             except urllib.error.HTTPError as he:
                 if he.code in [416, 400]:
                     initial_bytes = 0
@@ -59,7 +70,14 @@ def download_file(url, dest_path, progress_callback=None):
                         url, 
                         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
                     )
-                    response = urllib.request.urlopen(req, timeout=30, context=context)
+                    try:
+                        response = urllib.request.urlopen(req, timeout=30, context=context)
+                    except urllib.error.URLError as ue:
+                        if isinstance(ue.reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(ue.reason):
+                            unverified_context = ssl._create_unverified_context()
+                            response = urllib.request.urlopen(req, timeout=30, context=unverified_context)
+                        else:
+                            raise ue
                 else:
                     raise he
                     
@@ -297,14 +315,14 @@ default-character-set = utf8mb4
             install_db_exe = os.path.join(mariadb_dir, "bin", "mysql_install_db.exe")
             
         if os.path.exists(install_db_exe):
-            cmd = f'"{install_db_exe}" --datadir="{db_dir}" --service=""'
+            cmd = [install_db_exe, f"--datadir={db_dir}", "--service="]
             try:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
                 subprocess.run(
                     cmd, 
-                    shell=True, 
+                    shell=False, 
                     capture_output=True, 
                     text=True, 
                     check=True,
@@ -388,8 +406,8 @@ def create_junction(src_dir, junction_path):
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
                 subprocess.run(
-                    f'rmdir "{junction_path}"', 
-                    shell=True,
+                    ["cmd.exe", "/c", "rmdir", junction_path], 
+                    shell=False,
                     startupinfo=startupinfo,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
@@ -398,13 +416,13 @@ def create_junction(src_dir, junction_path):
     os.makedirs(os.path.dirname(junction_path), exist_ok=True)
     
     # Execute mklink /j
-    cmd = f'mklink /j "{junction_path}" "{src_dir}"'
+    cmd = ["cmd.exe", "/c", "mklink", "/j", junction_path, src_dir]
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = subprocess.SW_HIDE
     res = subprocess.run(
         cmd, 
-        shell=True, 
+        shell=False, 
         capture_output=True, 
         text=True,
         startupinfo=startupinfo,

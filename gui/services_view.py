@@ -5,8 +5,9 @@ import webbrowser
 import subprocess
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QGroupBox, QGridLayout, QPlainTextEdit, QMessageBox
+    QPushButton, QGroupBox, QGridLayout, QPlainTextEdit, QMessageBox, QFrame
 )
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 import qtawesome as qta
 
@@ -31,15 +32,7 @@ class StatusWorker(QThread):
                 running_procs = get_running_processes_ctypes()
                 results = {}
                 for name in ["nginx", "apache", "mysql", "php-cgi", "mailpit"]:
-                    srv = SERVICES[name]
-                    port_active = is_port_in_use(srv["port"])
-                    proc_active = srv["process_name"].lower() in running_procs
-                    
-                    if port_active or proc_active:
-                        status = "Running"
-                    else:
-                        status = "Stopped"
-                    results[name] = status
+                    results[name] = get_service_status(name, self.env_root, running_procs)
                 
                 self.status_updated.emit(results)
             except Exception as e:
@@ -236,11 +229,66 @@ class ServicesView(QWidget):
         color = self.main_win.get_icon_color()
         self.btn_shell.setIcon(qta.icon("fa5s.terminal", color=color))
         
+        # Update logo wrapper styles based on theme
+        for key in self.service_keys:
+            widgets = self.rows.get(key)
+            if widgets and "logo_wrapper" in widgets:
+                wrapper = widgets["logo_wrapper"]
+                if wrapper:
+                    if self.main_win.theme == "dark":
+                        wrapper.setStyleSheet("background-color: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;")
+                    else:
+                        wrapper.setStyleSheet("background-color: #f1f5f9; border-radius: 6px; border: 1px solid #cbd5e1;")
+
+    def get_logo_path(self, key):
+        import sys
+        mapping = {
+            "nginx": "nginx.svg",
+            "apache": "apache.svg",
+            "mysql": "mysql.svg",
+            "php-cgi": "php.svg",
+            "mailpit": "mailpit.svg"
+        }
+        logo_name = mapping.get(key, f"{key}.svg")
+        
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, "assets", "brand-logos", logo_name)
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "brand-logos", logo_name)
+        
     def create_service_row(self, row_idx, key):
-        # 1. Module Name
+        # 1. Module Name and Logo
+        cell_widget = QWidget()
+        cell_layout = QHBoxLayout(cell_widget)
+        cell_layout.setContentsMargins(0, 0, 0, 0)
+        cell_layout.setSpacing(10)
+        
+        logo_wrapper = QFrame()
+        logo_wrapper.setFixedSize(32, 32)
+        if self.main_win.theme == "dark":
+            logo_wrapper.setStyleSheet("background-color: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;")
+        else:
+            logo_wrapper.setStyleSheet("background-color: #f1f5f9; border-radius: 6px; border: 1px solid #cbd5e1;")
+            
+        logo_layout = QVBoxLayout(logo_wrapper)
+        logo_layout.setContentsMargins(4, 4, 4, 4)
+        logo_layout.setAlignment(Qt.AlignCenter)
+        
+        logo_lbl = QLabel()
+        logo_lbl.setFixedSize(24, 24)
+        logo_lbl.setScaledContents(True)
+        
+        logo_path = self.get_logo_path(key)
+        if os.path.exists(logo_path):
+            logo_lbl.setPixmap(QPixmap(logo_path))
+            
+        logo_layout.addWidget(logo_lbl)
+        cell_layout.addWidget(logo_wrapper)
+        
         name_lbl = QLabel(self.service_names[key])
         name_lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
-        self.grid.addWidget(name_lbl, row_idx, 0)
+        cell_layout.addWidget(name_lbl)
+        
+        self.grid.addWidget(cell_widget, row_idx, 0)
         
         # 2. Status Label (resembles XAMPP port/status highlight)
         status_lbl = QLabel("Stopped")
@@ -280,7 +328,8 @@ class ServicesView(QWidget):
         return {
             "status_lbl": status_lbl,
             "btn_action": btn_action,
-            "btn_admin": btn_admin
+            "btn_admin": btn_admin,
+            "logo_wrapper": logo_wrapper
         }
         
     def log_event(self, text):
@@ -313,20 +362,55 @@ class ServicesView(QWidget):
                 status_lbl.setText(f"Running (Port: {port})")
                 status_lbl.setStyleSheet("color: #10b981; font-weight: bold; font-size: 11px;")
                 btn_action.setText("Stop")
+                btn_action.setEnabled(True)
                 btn_action.setObjectName("stop_btn")
                 btn_action.style().unpolish(btn_action)
                 btn_action.style().polish(btn_action)
                 btn_admin.setEnabled(True)
+            elif status == "Port Conflict (External App)":
+                if "Conflict" not in status_lbl.text():
+                    self.log_event(f"WARNING: Port conflict detected on port {port} for {self.service_names[key]}. An external application is using this port.")
+                status_lbl.setText("Port Conflict (External)")
+                status_lbl.setStyleSheet("color: #f97316; font-weight: bold; font-size: 11px;")
+                btn_action.setText("Start")
+                btn_action.setEnabled(False)
+                btn_action.setObjectName("start_btn")
+                btn_action.style().unpolish(btn_action)
+                btn_action.style().polish(btn_action)
+                btn_admin.setEnabled(False)
             else:
                 if "Stopped" not in status_lbl.text():
                     self.log_event(f"{self.service_names[key]} has stopped.")
                 status_lbl.setText("Stopped")
                 status_lbl.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 11px;")
                 btn_action.setText("Start")
+                btn_action.setEnabled(True)
                 btn_action.setObjectName("start_btn")
                 btn_action.style().unpolish(btn_action)
                 btn_action.style().polish(btn_action)
                 btn_admin.setEnabled(False)
+                
+        # Check if batch worker is running. If it is, do not overwrite button states
+        if self.batch_worker and self.batch_worker.isRunning():
+            return
+            
+        nginx_running = results.get("nginx", "Stopped") == "Running"
+        apache_running = results.get("apache", "Stopped") == "Running"
+        mysql_running = results.get("mysql", "Stopped") == "Running"
+        php_running = results.get("php-cgi", "Stopped") == "Running"
+        mailpit_running = results.get("mailpit", "Stopped") == "Running"
+        
+        web_server_running = nginx_running or apache_running
+        
+        # Mailpit is optional, only check if it is installed locally
+        mailpit_exe = os.path.join(self.main_win.env_root, "mailpit", "mailpit.exe")
+        mailpit_installed = os.path.exists(mailpit_exe)
+        
+        all_running = mysql_running and php_running and web_server_running and (not mailpit_installed or mailpit_running)
+        any_running = nginx_running or apache_running or mysql_running or php_running or mailpit_running
+        
+        self.btn_start_all.setEnabled(not all_running)
+        self.btn_stop_all.setEnabled(any_running)
                 
     def toggle_service(self, key):
         if key in self.active_action_workers:
@@ -469,7 +553,15 @@ class ServicesView(QWidget):
         self.btn_start_all.setEnabled(enabled)
         self.btn_stop_all.setEnabled(enabled)
         for key in self.service_keys:
-            self.rows[key]["btn_action"].setEnabled(enabled)
+            btn_action = self.rows[key]["btn_action"]
+            status_lbl = self.rows[key]["status_lbl"]
+            if enabled:
+                if "Conflict" in status_lbl.text():
+                    btn_action.setEnabled(False)
+                else:
+                    btn_action.setEnabled(True)
+            else:
+                btn_action.setEnabled(False)
         
     def open_environment_shell(self):
         self.log_event("Launching local environment PowerShell session...")

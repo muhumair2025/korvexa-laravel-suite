@@ -175,7 +175,7 @@ class InstallWorker(QThread):
                 php_active = os.path.join(self.env_root, "php", "active")
                 env["PATH"] = php_active + ";" + env.get("PATH", "")
                 
-                cmd = f'"{composer_bat}" global require laravel/installer --no-interaction'
+                cmd = ["cmd.exe", "/c", composer_bat, "global", "require", "laravel/installer", "--no-interaction"]
                 
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -184,7 +184,7 @@ class InstallWorker(QThread):
                 import subprocess as sub_proc
                 res = sub_proc.run(
                     cmd, 
-                    shell=True, 
+                    shell=False, 
                     capture_output=True, 
                     text=True, 
                     env=env,
@@ -453,6 +453,17 @@ class OnboardingView(QWidget):
         else:
             self.btn_install_all.setIcon(qta.icon("fa5s.download", color=color))
             
+        # Update logo wrapper styles based on theme
+        for key in self.tool_keys:
+            card = self.cards.get(key)
+            if card:
+                wrapper = card.property("logo_wrapper")
+                if wrapper:
+                    if self.main_win.theme == "dark":
+                        wrapper.setStyleSheet("background-color: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;")
+                    else:
+                        wrapper.setStyleSheet("background-color: #f1f5f9; border-radius: 6px; border: 1px solid #cbd5e1;")
+                        
         # Dynamically style thin progress bar based on active theme to prevent Windows clipping bug
         if self.main_win.theme == "dark":
             self.progress_bar.setStyleSheet(
@@ -479,7 +490,29 @@ class OnboardingView(QWidget):
                 "}"
             )
 
+    def get_logo_path(self, key):
+        import sys
+        mapping = {
+            "vcredist": "visual.svg",
+            "git": "git-scm.svg",
+            "php": "php.svg",
+            "composer": "composer.svg",
+            "laravel": "laravel.svg",
+            "mysql": "mysql.svg",
+            "nginx": "nginx.svg",
+            "apache": "apache.svg",
+            "node": "node.svg",
+            "phpmyadmin": "phpmyadmin.svg",
+            "mailpit": "mailpit.svg"
+        }
+        logo_name = mapping.get(key, f"{key}.svg")
+        
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, "assets", "brand-logos", logo_name)
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "brand-logos", logo_name)
+
     def create_tool_card(self, key):
+        from PySide6.QtGui import QPixmap
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
         card.setFrameShadow(QFrame.Raised)
@@ -491,6 +524,30 @@ class OnboardingView(QWidget):
         icon_label.setFixedSize(24, 24)
         card_layout.addWidget(icon_label)
         card.setProperty("status_icon", icon_label)
+        
+        # Logo Wrapper
+        logo_wrapper = QFrame()
+        logo_wrapper.setFixedSize(36, 36)
+        if self.main_win.theme == "dark":
+            logo_wrapper.setStyleSheet("background-color: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;")
+        else:
+            logo_wrapper.setStyleSheet("background-color: #f1f5f9; border-radius: 6px; border: 1px solid #cbd5e1;")
+            
+        logo_layout = QVBoxLayout(logo_wrapper)
+        logo_layout.setContentsMargins(4, 4, 4, 4)
+        logo_layout.setAlignment(Qt.AlignCenter)
+        
+        logo_lbl = QLabel()
+        logo_lbl.setFixedSize(28, 28)
+        logo_lbl.setScaledContents(True)
+        
+        logo_path = self.get_logo_path(key)
+        if os.path.exists(logo_path):
+            logo_lbl.setPixmap(QPixmap(logo_path))
+            
+        logo_layout.addWidget(logo_lbl)
+        card_layout.addWidget(logo_wrapper)
+        card.setProperty("logo_wrapper", logo_wrapper)
         
         # Metadata
         text_layout = QVBoxLayout()
@@ -652,12 +709,22 @@ class OnboardingView(QWidget):
                 btn_action.setStyleSheet("font-weight: bold; font-size: 11px; color: #ef4444;")
                 btn_action.clicked.connect(lambda checked=False, k=key: self.uninstall_single_tool(k))
             else:
-                # Not installed (Red Cross)
-                icon_lbl.setPixmap(qta.icon("fa5s.times-circle", color="#d13438").pixmap(QSize(20, 20)))
-                ver_lbl.setText("Not Detected")
-                ver_lbl.setStyleSheet("color: #64748b; font-weight: normal; font-size: 12px;")
-                btn_path.setVisible(False)
+                # Not installed locally
+                global_path = res.get("global_path")
+                if global_path:
+                    # An external/global instance is detected (Warning Orange / Info)
+                    icon_lbl.setPixmap(qta.icon("fa5s.exclamation-triangle", color="#d97706").pixmap(QSize(20, 20)))
+                    ver_lbl.setText("Not Installed Locally (Global Detected)")
+                    ver_lbl.setStyleSheet("color: #d97706; font-weight: bold; font-size: 11px;")
+                    ver_lbl.setToolTip(f"Global installation detected at:\n{global_path}\n\nYou can click Install to set up an isolated local environment for the suite.")
+                else:
+                    # Not installed anywhere (Red Cross)
+                    icon_lbl.setPixmap(qta.icon("fa5s.times-circle", color="#d13438").pixmap(QSize(20, 20)))
+                    ver_lbl.setText("Not Detected")
+                    ver_lbl.setStyleSheet("color: #64748b; font-weight: normal; font-size: 12px;")
+                    ver_lbl.setToolTip("")
                 
+                btn_path.setVisible(False)
                 btn_action.setText("Install")
                 btn_action.setStyleSheet("font-weight: bold; font-size: 11px; color: #ffffff;" if self.main_win.theme == "dark" else "font-weight: bold; font-size: 11px;")
                 btn_action.clicked.connect(lambda checked=False, k=key: self.install_single_tool(k))
@@ -807,8 +874,8 @@ class OnboardingView(QWidget):
                     php_active = os.path.join(self.main_win.env_root, "php", "active")
                     env["PATH"] = php_active + ";" + env.get("PATH", "")
                     subprocess.run(
-                        f'"{composer_bat}" global remove laravel/installer --no-interaction',
-                        shell=True,
+                        ["cmd.exe", "/c", composer_bat, "global", "remove", "laravel/installer", "--no-interaction"],
+                        shell=False,
                         capture_output=True,
                         env=env,
                         startupinfo=startupinfo,

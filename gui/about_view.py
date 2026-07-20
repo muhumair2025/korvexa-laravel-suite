@@ -161,7 +161,7 @@ class AboutView(QWidget):
         
         lbl_email_title = QLabel("Email:")
         lbl_email_title.setStyleSheet("font-weight: bold; font-size: 11px; color: #94a3b8;")
-        lbl_email_val = QLabel("muhumair2022@ggmail.com")
+        lbl_email_val = QLabel("support@korvexa.app")
         lbl_email_val.setStyleSheet("font-size: 11px; color: #3b82f6;") # Elegant link color
         
         dev_info_layout.addWidget(lbl_name_title, 0, 0)
@@ -174,11 +174,17 @@ class AboutView(QWidget):
         self.btn_email = QPushButton(" Contact Developer")
         self.btn_email.setFixedHeight(32)
         self.btn_email.setIconSize(QSize(14, 14))
-        self.btn_email.clicked.connect(lambda: webbrowser.open("mailto:muhumair2022@ggmail.com"))
+        self.btn_email.clicked.connect(lambda: webbrowser.open("mailto:support@korvexa.app"))
+        
+        self.btn_check_update = QPushButton(" Check for Updates")
+        self.btn_check_update.setFixedHeight(32)
+        self.btn_check_update.setIconSize(QSize(14, 14))
+        self.btn_check_update.clicked.connect(lambda: self.main_win.check_app_updates(is_manual=True))
         
         dev_layout.addWidget(dev_title)
         dev_layout.addLayout(dev_info_layout)
         dev_layout.addWidget(self.btn_email)
+        dev_layout.addWidget(self.btn_check_update)
         
         left_layout.addWidget(dev_card)
         left_layout.addStretch()
@@ -298,6 +304,25 @@ class AboutView(QWidget):
             f"}}"
         )
         
+        # Check Update Button Style (Outline Blue)
+        self.btn_check_update.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  color: #3b82f6;"
+            "  border: 1px solid #3b82f6;"
+            "  font-weight: bold;"
+            "  border-radius: 4px;"
+            "  padding: 6px 12px;"
+            "  font-size: 11px;"
+            "}"
+            f"QPushButton:hover {{"
+            f"  background-color: rgba(59, 130, 246, 0.15);"
+            f"}}"
+            f"QPushButton:pressed {{"
+            f"  background-color: rgba(59, 130, 246, 0.25);"
+            f"}}"
+        )
+        
         # Update instruction steps styling
         step_bg = "rgba(30, 41, 59, 0.45)" if is_dark else "rgba(226, 232, 240, 0.55)"
         step_border = "1px solid #334155" if is_dark else "1px solid #cbd5e1"
@@ -323,4 +348,5 @@ class AboutView(QWidget):
         self.btn_star.setIcon(qta.icon("fa5s.star", color="#eab308"))
         self.btn_github.setIcon(qta.icon("fa5b.github", color=color))
         self.btn_email.setIcon(qta.icon("fa5s.envelope", color=color))
+        self.btn_check_update.setIcon(qta.icon("fa5s.sync-alt", color=color))
         self.apply_button_styles()

@@ -38,6 +38,27 @@ def get_pid_by_port(port):
         logger.error(f"Error finding PID for port {port}: {e}")
     return None
 
+def get_process_exe_path(pid):
+    """Retrieves the full executable path of a process by its PID using native Windows API."""
+    import ctypes
+    from ctypes import wintypes
+    
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h_process = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h_process:
+        return None
+        
+    try:
+        size = wintypes.DWORD(512)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_process, 0, buf, ctypes.byref(size)):
+            return buf.value
+    except Exception:
+        pass
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h_process)
+    return None
+
 # Windows Toolhelp structures for ctypes
 TH32CS_SNAPPROCESS = 0x00000002
 
@@ -163,8 +184,22 @@ def get_service_status(name, env_root, running_processes=None):
     else:
         proc_active = is_process_running(srv["process_name"])
     
-    if port_active or proc_active:
+    if port_active:
+        pid = get_pid_by_port(srv["port"])
+        if pid:
+            exe_path = get_process_exe_path(pid)
+            if exe_path:
+                norm_env_root = os.path.abspath(env_root).lower()
+                norm_exe_path = os.path.abspath(exe_path).lower()
+                if norm_exe_path.startswith(norm_env_root):
+                    return "Running"
+                else:
+                    return "Port Conflict (External App)"
+        return "Running (External / Unknown)"
+        
+    if proc_active:
         return "Running"
+        
     return "Stopped"
 
 def start_service(name, env_root, log_dir):
@@ -211,6 +246,15 @@ def start_service(name, env_root, log_dir):
     if is_port_in_use(srv["port"]):
         pid = get_pid_by_port(srv["port"])
         if pid:
+            exe_path = get_process_exe_path(pid)
+            if exe_path:
+                norm_env_root = os.path.abspath(env_root).lower()
+                norm_exe_path = os.path.abspath(exe_path).lower()
+                if not norm_exe_path.startswith(norm_env_root):
+                    # It's an external process holding the port. Do NOT kill it! Abort start.
+                    return False, f"Port {srv['port']} is currently in use by an external application:\n{os.path.basename(exe_path)} ({exe_path}).\nPlease stop that application or select a custom port in Settings."
+            
+            # It's a local process or path could not be resolved, terminate it to start fresh
             try:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
