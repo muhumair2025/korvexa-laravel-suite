@@ -1,5 +1,5 @@
 #define MyAppName "Laravel Suite"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "Korvexa"
 #define MyAppURL "https://korvexa.app"
 #define MyAppExeName "LaravelSuite.exe"
@@ -19,7 +19,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 
 OutputDir=Installer
-OutputBaseFilename=LaravelSuite-Setup-v1.0.4
+OutputBaseFilename=LaravelSuite-Setup-v1.0.5
 
 Compression=lzma2
 SolidCompression=yes
@@ -33,7 +33,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 PrivilegesRequired=admin
 
-VersionInfoVersion=1.0.4
+VersionInfoVersion=1.0.5
 VersionInfoCompany=Korvexa
 VersionInfoDescription=Laravel Development Suite
 VersionInfoProductName=Laravel Suite

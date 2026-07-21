@@ -5,8 +5,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QComboBox, QTextEdit, 
     QProgressBar, QFrame, QFileDialog, QMessageBox,
-    QGroupBox, QFormLayout
+    QGroupBox, QFormLayout, QMenu, QTabWidget, QGridLayout
 )
+from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt, QThread, Signal
 import qtawesome as qta
 
@@ -359,6 +360,88 @@ class ViteBuildWorker(QThread):
             self.completed.emit(False, f"NPM asset build failed with code {p.returncode}.")
 
 
+class LiveProcessWorker(QThread):
+    line_read = Signal(str)
+    finished = Signal(int)
+
+    def __init__(self, cmd, cwd, env, log_path=None):
+        super().__init__()
+        self.cmd = cmd
+        self.cwd = cwd
+        self.env = env
+        self.log_path = log_path
+        self.process = None
+
+    def run(self):
+        import subprocess
+        import time
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        
+        log_file = None
+        if self.log_path:
+            try:
+                os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+                log_file = open(self.log_path, "w", encoding="utf-8")
+                log_file.write(f"--- Command execution started at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                log_file.write(f"> Command: {' '.join(self.cmd)}\n\n")
+                log_file.flush()
+            except Exception as e:
+                logger.error(f"Failed to open log file {self.log_path}: {e}")
+
+        try:
+            self.process = subprocess.Popen(
+                self.cmd,
+                cwd=self.cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=self.env,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    break
+                stripped_line = line.strip()
+                self.line_read.emit(stripped_line)
+                if log_file:
+                    log_file.write(line)
+                    log_file.flush()
+            
+            self.process.wait()
+            ret = self.process.returncode
+            self.finished.emit(ret)
+        except Exception as e:
+            self.line_read.emit(f"Error executing command: {e}")
+            if log_file:
+                log_file.write(f"Error: {e}\n")
+                log_file.flush()
+            self.finished.emit(-1)
+        finally:
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+
+    def terminate_process(self):
+        if self.process and self.process.poll() is None:
+            try:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                self.process.wait()
+            except Exception:
+                pass
+
+
 class LaravelView(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -366,8 +449,9 @@ class LaravelView(QWidget):
         self.create_worker = None
         self.artisan_worker = None
         self.build_worker = None
-        self.dev_processes = {}
-        self.vite_log_files = {}
+        self.dev_workers = {}
+        self.queue_workers = {}
+        self.scheduler_workers = {}
         self.init_ui()
 
     def init_ui(self):
@@ -392,15 +476,25 @@ class LaravelView(QWidget):
         body = QHBoxLayout()
         body.setSpacing(15)
 
-        # Left Column: Inputs and commands
+        # Left Column: Tabbed Control Center
         left_panel = QFrame()
         left_panel.setObjectName("tool_card")
         left_panel.setFrameShape(QFrame.StyledPanel)
         left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(5, 5, 5, 5)
+
+        self.control_tabs = QTabWidget()
+        self.control_tabs.setStyleSheet("QTabBar::tab { font-size: 10px; font-weight: bold; padding: 6px 12px; }")
+        left_lay.addWidget(self.control_tabs)
+
+        # Tab 1: App Scaffolder
+        scaffolder_widget = QWidget()
+        scaffolder_lay = QVBoxLayout(scaffolder_widget)
+        scaffolder_lay.setSpacing(10)
         
         create_title = QLabel("Create New Laravel App")
-        create_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444; margin-bottom: 5px;")
-        left_lay.addWidget(create_title)
+        create_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444;")
+        scaffolder_lay.addWidget(create_title)
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -409,7 +503,6 @@ class LaravelView(QWidget):
         self.txt_name.setPlaceholderText("e.g. my-laravel-app")
         self.txt_name.setFixedHeight(26)
 
-        # Location Selector
         loc_lay = QHBoxLayout()
         self.txt_location = QLineEdit()
         default_www = os.path.join(self.main_win.env_root, "www").replace("\\", "/")
@@ -422,7 +515,6 @@ class LaravelView(QWidget):
         loc_lay.addWidget(self.txt_location)
         loc_lay.addWidget(btn_loc)
 
-        # Starter Kits
         self.cmb_kit = QComboBox()
         self.cmb_kit.addItems([
             "None (Default Laravel)",
@@ -432,7 +524,6 @@ class LaravelView(QWidget):
         ])
         self.cmb_kit.setFixedHeight(26)
 
-        # Database Setup Group
         self.db_group = QGroupBox("Database Autolink Settings")
         db_form = QFormLayout(self.db_group)
         db_form.setSpacing(6)
@@ -456,33 +547,54 @@ class LaravelView(QWidget):
         form.addRow("Install Folder:", loc_lay)
         form.addRow("Starter Kit:", self.cmb_kit)
         
-        left_lay.addLayout(form)
-        left_lay.addWidget(self.db_group)
+        scaffolder_lay.addLayout(form)
+        scaffolder_lay.addWidget(self.db_group)
 
         self.btn_create = QPushButton(" Scaffold Laravel App")
         self.btn_create.setIcon(qta.icon("fa5b.laravel", color="#ffffff"))
         self.btn_create.setFixedHeight(30)
         self.btn_create.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; font-size: 11px;")
         self.btn_create.clicked.connect(self.create_laravel_app)
-        left_lay.addWidget(self.btn_create)
+        scaffolder_lay.addWidget(self.btn_create)
+        scaffolder_lay.addStretch()
+        
+        self.control_tabs.addTab(scaffolder_widget, "App Scaffolder")
 
-        # Artisan Command Runner Card
-        left_lay.addSpacing(10)
+        # Tab 2: Artisan Console
+        artisan_runner_widget = QWidget()
+        artisan_runner_lay = QVBoxLayout(artisan_runner_widget)
+        artisan_runner_lay.setSpacing(10)
+
         artisan_title = QLabel("Artisan Command Runner")
-        artisan_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444; margin-top: 5px;")
-        left_lay.addWidget(artisan_title)
+        artisan_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444;")
+        artisan_runner_lay.addWidget(artisan_title)
 
         art_form = QFormLayout()
         art_form.setSpacing(8)
+        
+        project_selection_layout = QHBoxLayout()
         self.cmb_project = QComboBox()
         self.cmb_project.setFixedHeight(26)
         self.cmb_project.setPlaceholderText("Select Laravel project...")
         
-        art_form.addRow("Select Project:", self.cmb_project)
-        left_lay.addLayout(art_form)
+        self.btn_import_project = QPushButton()
+        self.btn_import_project.setIcon(qta.icon("fa5s.folder-plus", color="#ef4444"))
+        self.btn_import_project.setFixedSize(26, 26)
+        self.btn_import_project.setToolTip("Import Custom Laravel Project Folder")
+        self.btn_import_project.clicked.connect(self.import_project)
+        
+        project_selection_layout.addWidget(self.cmb_project, 4)
+        project_selection_layout.addWidget(self.btn_import_project, 1)
+        
+        art_form.addRow("Select Project:", project_selection_layout)
+        artisan_runner_lay.addLayout(art_form)
 
-        # Quick Actions
-        quick_lay = QHBoxLayout()
+        # Quick Actions Group
+        quick_group = QGroupBox("Quick Commands")
+        quick_group_lay = QVBoxLayout(quick_group)
+        
+        quick_grid = QGridLayout()
+        quick_grid.setSpacing(6)
         btn_migrate = QPushButton("Migrate")
         btn_migrate.clicked.connect(lambda: self.run_artisan(["migrate"]))
         btn_seed = QPushButton("Seed")
@@ -493,12 +605,19 @@ class LaravelView(QWidget):
         btn_clear.clicked.connect(lambda: self.run_artisan(["optimize:clear"]))
         
         for btn in [btn_migrate, btn_seed, btn_key, btn_clear]:
-            btn.setFixedHeight(24)
+            btn.setFixedHeight(26)
             btn.setStyleSheet("font-size: 10px;")
-            quick_lay.addWidget(btn)
-        left_lay.addLayout(quick_lay)
+            
+        quick_grid.addWidget(btn_migrate, 0, 0)
+        quick_grid.addWidget(btn_seed, 0, 1)
+        quick_grid.addWidget(btn_key, 1, 0)
+        quick_grid.addWidget(btn_clear, 1, 1)
+        quick_group_lay.addLayout(quick_grid)
+        artisan_runner_lay.addWidget(quick_group)
 
-        # Custom command line
+        # Custom commands group
+        custom_group = QGroupBox("Custom Artisan Command")
+        custom_group_lay = QVBoxLayout(custom_group)
         custom_lay = QHBoxLayout()
         self.txt_custom_art = QLineEdit()
         self.txt_custom_art.setPlaceholderText("custom-command --option")
@@ -509,50 +628,86 @@ class LaravelView(QWidget):
         btn_custom_run.clicked.connect(self.run_custom_artisan)
         custom_lay.addWidget(self.txt_custom_art)
         custom_lay.addWidget(btn_custom_run)
-        left_lay.addLayout(custom_lay)
+        custom_group_lay.addLayout(custom_lay)
+        artisan_runner_lay.addWidget(custom_group)
+        artisan_runner_lay.addStretch()
 
-        # Vite / NPM Dev Tools Card
-        left_lay.addSpacing(10)
-        vite_title = QLabel("Vite / NPM Dev Tools")
-        vite_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444; margin-top: 5px;")
-        left_lay.addWidget(vite_title)
+        self.control_tabs.addTab(artisan_runner_widget, "Artisan Console")
+
+        # Tab 3: Worker Controls
+        workers_widget = QWidget()
+        workers_lay = QVBoxLayout(workers_widget)
+        workers_lay.setSpacing(12)
+
+        workers_title = QLabel("Background Service Runners")
+        workers_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444;")
+        workers_lay.addWidget(workers_title)
+
+        # Vite Dev Server Group
+        vite_group = QGroupBox("Vite Assets Dev / Build")
+        vite_group_lay = QVBoxLayout(vite_group)
+        vite_group_lay.setSpacing(8)
         
-        vite_lay = QHBoxLayout()
-        self.btn_vite_dev = QPushButton("npm run dev")
-        self.btn_vite_dev.setFixedHeight(24)
-        self.btn_vite_dev.setStyleSheet("font-size: 10px;")
+        self.btn_vite_dev = QPushButton("Start Vite Server (npm run dev)")
+        self.btn_vite_dev.setFixedHeight(28)
+        self.btn_vite_dev.setStyleSheet("font-size: 10px; font-weight: bold;")
         self.btn_vite_dev.clicked.connect(self.toggle_vite_dev)
         
-        self.btn_vite_build = QPushButton("npm run build")
-        self.btn_vite_build.setFixedHeight(24)
+        self.btn_vite_build = QPushButton("Compile Production Assets (npm run build)")
+        self.btn_vite_build.setFixedHeight(28)
         self.btn_vite_build.setStyleSheet("font-size: 10px;")
         self.btn_vite_build.clicked.connect(self.run_vite_build)
         
-        self.btn_vite_logs = QPushButton("Vite Logs")
-        self.btn_vite_logs.setFixedHeight(24)
-        self.btn_vite_logs.setStyleSheet("font-size: 10px;")
-        self.btn_vite_logs.clicked.connect(self.show_vite_logs)
+        vite_group_lay.addWidget(self.btn_vite_dev)
+        vite_group_lay.addWidget(self.btn_vite_build)
+        workers_lay.addWidget(vite_group)
+
+        # Background Queue & Sched Group
+        background_group = QGroupBox("Laravel Queues & Schedulers")
+        background_group_lay = QVBoxLayout(background_group)
+        background_group_lay.setSpacing(8)
         
-        vite_lay.addWidget(self.btn_vite_dev)
-        vite_lay.addWidget(self.btn_vite_build)
-        vite_lay.addWidget(self.btn_vite_logs)
-        left_lay.addLayout(vite_lay)
+        self.btn_queue_worker = QPushButton("Start Queue Worker (artisan queue:work)")
+        self.btn_queue_worker.setFixedHeight(28)
+        self.btn_queue_worker.setStyleSheet("font-size: 10px; font-weight: bold;")
+        self.btn_queue_worker.clicked.connect(self.toggle_queue_worker)
+        
+        self.btn_scheduler_worker = QPushButton("Start Scheduler Loop (artisan schedule:work)")
+        self.btn_scheduler_worker.setFixedHeight(28)
+        self.btn_scheduler_worker.setStyleSheet("font-size: 10px; font-weight: bold;")
+        self.btn_scheduler_worker.clicked.connect(self.toggle_scheduler_worker)
+        
+        background_group_lay.addWidget(self.btn_queue_worker)
+        background_group_lay.addWidget(self.btn_scheduler_worker)
+        workers_lay.addWidget(background_group)
+        workers_lay.addStretch()
+
+        self.control_tabs.addTab(workers_widget, "Worker Controls")
 
         self.cmb_project.currentTextChanged.connect(self.on_project_changed)
 
         body.addWidget(left_panel, 1)
 
-        # Right Column: Colorful Console / Interactive Terminal
+        # Right Column: Tabbed Terminal Console Layout
         right_panel = QFrame()
         right_panel.setObjectName("tool_card")
         right_panel.setFrameShape(QFrame.StyledPanel)
         right_lay = QVBoxLayout(right_panel)
+        right_lay.setContentsMargins(5, 5, 5, 5)
         
-        console_title = QLabel("Execution Logs & Interactive Terminal")
-        console_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444;")
-        right_lay.addWidget(console_title)
+        terminal_title = QLabel("Execution Terminals & Process Outputs")
+        terminal_title.setStyleSheet("font-size: 12px; font-weight: bold; color: #ef4444; padding-left: 5px; padding-top: 5px;")
+        right_lay.addWidget(terminal_title)
 
-        # Terminal Panel Style (Dark Slate background)
+        self.terminal_tabs = QTabWidget()
+        self.terminal_tabs.setStyleSheet("QTabBar::tab { font-size: 10px; font-weight: bold; padding: 6px 12px; }")
+        right_lay.addWidget(self.terminal_tabs)
+
+        # Tab 1: Artisan Terminal
+        artisan_term = QWidget()
+        artisan_term_lay = QVBoxLayout(artisan_term)
+        artisan_term_lay.setContentsMargins(5, 5, 5, 5)
+        
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setStyleSheet(
@@ -565,7 +720,7 @@ class LaravelView(QWidget):
             "padding: 8px; "
             "selection-background-color: #334155;"
         )
-        right_lay.addWidget(self.console)
+        artisan_term_lay.addWidget(self.console)
 
         # Interactive Stdin input block
         stdin_lay = QHBoxLayout()
@@ -592,16 +747,60 @@ class LaravelView(QWidget):
         stdin_lay.addWidget(self.txt_stdin)
         stdin_lay.addWidget(self.btn_send_stdin)
         stdin_lay.addWidget(self.btn_clear_console)
-        right_lay.addLayout(stdin_lay)
+        artisan_term_lay.addLayout(stdin_lay)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(6)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(False)
-        right_lay.addWidget(self.progress_bar)
+        artisan_term_lay.addWidget(self.progress_bar)
+        
+        self.terminal_tabs.addTab(artisan_term, "Artisan & Setup")
 
-        body.addWidget(right_panel, 1.2) # Give terminal slightly more space
+        # helper function to create terminal tab layout
+        def create_term_tab(clear_slot):
+            tab = QWidget()
+            tab_lay = QVBoxLayout(tab)
+            tab_lay.setContentsMargins(5, 5, 5, 5)
+            
+            console = QTextEdit()
+            console.setReadOnly(True)
+            console.setStyleSheet(
+                "background-color: #0f172a; "
+                "color: #f1f5f9; "
+                "font-family: 'Consolas', 'Courier New', monospace; "
+                "font-size: 11px; "
+                "border: 1px solid #1e293b; "
+                "border-radius: 6px; "
+                "padding: 8px; "
+                "selection-background-color: #334155;"
+            )
+            tab_lay.addWidget(console)
+            
+            ctrl_row = QHBoxLayout()
+            ctrl_row.addStretch()
+            btn_clear = QPushButton("Clear Console")
+            btn_clear.setFixedHeight(24)
+            btn_clear.setStyleSheet("font-size: 10px;")
+            btn_clear.clicked.connect(clear_slot)
+            ctrl_row.addWidget(btn_clear)
+            tab_lay.addLayout(ctrl_row)
+            return tab, console
+
+        # Tab 2: Vite Terminal
+        vite_tab, self.vite_console = create_term_tab(self.clear_vite_console)
+        self.terminal_tabs.addTab(vite_tab, "Vite Server")
+
+        # Tab 3: Queue Terminal
+        queue_tab, self.queue_console = create_term_tab(self.clear_queue_console)
+        self.terminal_tabs.addTab(queue_tab, "Queue Worker")
+
+        # Tab 4: Scheduler Terminal
+        scheduler_tab, self.scheduler_console = create_term_tab(self.clear_scheduler_console)
+        self.terminal_tabs.addTab(scheduler_tab, "Task Scheduler")
+
+        body.addWidget(right_panel, 1.2) # Give terminal tabs slightly more space
         layout.addLayout(body)
 
         self.refresh_project_list()
@@ -612,41 +811,66 @@ class LaravelView(QWidget):
             self.txt_location.setText(folder.replace("\\", "/"))
 
     def refresh_project_list(self):
+        current_active_path = self.cmb_project.currentData()
         self.cmb_project.clear()
         www_dir = self.txt_location.text().strip()
-        if not os.path.exists(www_dir):
-            return
-            
-        def get_mtime():
-            try:
-                return os.path.getmtime(www_dir)
-            except Exception:
-                return 0
-                
-        from core.cache import cache_manager
-        cache_key = f"laravel_projects:{www_dir}"
-        cached_projects = cache_manager.get(cache_key, validator_func=get_mtime)
+        projects_dict = {}
         
-        if cached_projects is not None:
-            for name in cached_projects:
-                self.cmb_project.addItem(name)
-            return
-            
-        projects = []
+        # 1. Scan default www_dir
+        if os.path.exists(www_dir):
+            try:
+                for name in os.listdir(www_dir):
+                    full_path = os.path.join(www_dir, name).replace("\\", "/")
+                    if os.path.isdir(full_path):
+                        if os.path.exists(os.path.join(full_path, "artisan")):
+                            projects_dict[os.path.abspath(full_path).lower()] = (name, os.path.abspath(full_path))
+            except Exception:
+                pass
+                
+        # 2. Scan virtual hosts from settings
         try:
-            for name in os.listdir(www_dir):
-                full_path = os.path.join(www_dir, name)
-                if os.path.isdir(full_path):
-                    if os.path.exists(os.path.join(full_path, "artisan")):
-                        projects.append(name)
-        except Exception:
-            pass
+            raw_vhosts = self.main_win.settings.value("virtual_hosts", "[]")
+            import json
+            vhosts = json.loads(str(raw_vhosts))
+            for host in vhosts:
+                doc_root = host.get("path", "").strip()
+                if doc_root:
+                    parent = os.path.dirname(doc_root)
+                    if os.path.exists(os.path.join(parent, "artisan")):
+                        name = f"{os.path.basename(parent)} (vhost)"
+                        projects_dict[os.path.abspath(parent).lower()] = (name, os.path.abspath(parent))
+                    elif os.path.exists(os.path.join(doc_root, "artisan")):
+                        name = f"{os.path.basename(doc_root)} (vhost)"
+                        projects_dict[os.path.abspath(doc_root).lower()] = (name, os.path.abspath(doc_root))
+        except Exception as e:
+            logger.warning(f"Failed to scan virtual hosts: {e}")
             
-        cache_manager.set(cache_key, projects, validator_state=get_mtime())
-        for name in projects:
-            self.cmb_project.addItem(name)
+        # 3. Load manually imported project paths
+        try:
+            raw_imports = self.main_win.settings.value("imported_projects", "[]")
+            import json
+            imported_paths = json.loads(str(raw_imports))
+            for p in imported_paths:
+                p = p.strip()
+                if p and os.path.exists(os.path.join(p, "artisan")):
+                    name = f"{os.path.basename(p)} (imported)"
+                    projects_dict[os.path.abspath(p).lower()] = (name, os.path.abspath(p))
+        except Exception as e:
+            logger.warning(f"Failed to load imported projects: {e}")
 
-    def log(self, text):
+        # Add unique projects
+        for name, path in sorted(projects_dict.values(), key=lambda x: x[0].lower()):
+            self.cmb_project.addItem(name, path)
+            
+        if current_active_path:
+            idx = self.cmb_project.findData(current_active_path)
+            if idx >= 0:
+                self.cmb_project.setCurrentIndex(idx)
+
+    def log(self, text, console=None):
+        if console is None:
+            console = self.console
+            
         # Semantic color syntax highlight parser
         cleaned = text.replace("<", "&lt;").replace(">", "&gt;")
         
@@ -663,8 +887,8 @@ class LaravelView(QWidget):
         else:
             html = f'<span style="color: #e2e8f0;">{cleaned}</span>'
             
-        self.console.append(html)
-        self.console.moveCursor(self.console.textCursor().MoveOperation.End)
+        console.append(html)
+        console.moveCursor(console.textCursor().MoveOperation.End)
 
     def send_stdin(self):
         text = self.txt_stdin.text().strip()
@@ -714,6 +938,7 @@ class LaravelView(QWidget):
             return
 
         self.console.clear()
+        self.terminal_tabs.setCurrentIndex(0)
         self.log(f"Starting Laravel project creation: '{name}' in '{location}'...")
         self.set_ui_locked(True)
 
@@ -761,8 +986,13 @@ class LaravelView(QWidget):
             QMessageBox.warning(self, "Selection Error", "Please select a Laravel project from the list first.")
             return
 
-        project_path = os.path.join(self.txt_location.text().strip(), project_name)
+        project_path = self.cmb_project.currentData()
+        if not project_path or not os.path.exists(project_path):
+            QMessageBox.warning(self, "Path Error", "Could not resolve project path.")
+            return
+            
         self.console.clear()
+        self.terminal_tabs.setCurrentIndex(0)
         self.progress_bar.setVisible(True)
         
         self.artisan_worker = ArtisanCommandWorker(
@@ -790,65 +1020,157 @@ class LaravelView(QWidget):
         self.run_artisan(args)
         self.txt_custom_art.clear()
 
+    def clear_vite_console(self):
+        self.vite_console.clear()
+
+    def clear_queue_console(self):
+        self.queue_console.clear()
+
+    def clear_scheduler_console(self):
+        self.scheduler_console.clear()
+
+    def load_log_history(self, project_path):
+        if not project_path:
+            return
+        project_name = os.path.basename(project_path)
+        # Load Vite history
+        vite_log = os.path.join(self.main_win.log_dir, f"vite_{project_name}.log")
+        self.vite_console.clear()
+        if os.path.exists(vite_log):
+            try:
+                with open(vite_log, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                self.log(f"--- Loaded log history for '{project_name}' (Vite) ---", self.vite_console)
+                for line in lines[-100:]:
+                    self.log(line.strip(), self.vite_console)
+            except Exception:
+                pass
+
+        # Load Queue history
+        queue_log = os.path.join(self.main_win.log_dir, f"queue_{project_name}.log")
+        self.queue_console.clear()
+        if os.path.exists(queue_log):
+            try:
+                with open(queue_log, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                self.log(f"--- Loaded log history for '{project_name}' (Queue) ---", self.queue_console)
+                for line in lines[-100:]:
+                    self.log(line.strip(), self.queue_console)
+            except Exception:
+                pass
+
+        # Load Scheduler history
+        sched_log = os.path.join(self.main_win.log_dir, f"scheduler_{project_name}.log")
+        self.scheduler_console.clear()
+        if os.path.exists(sched_log):
+            try:
+                with open(sched_log, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                self.log(f"--- Loaded log history for '{project_name}' (Scheduler) ---", self.scheduler_console)
+                for line in lines[-100:]:
+                    self.log(line.strip(), self.scheduler_console)
+            except Exception:
+                pass
+
+    def on_project_changed(self, text):
+        path = self.cmb_project.currentData()
+        if not path:
+            return
+            
+        self.load_log_history(path)
+        
+        if text in self.dev_workers and self.dev_workers[text].isRunning():
+            self.btn_vite_dev.setText("Stop Vite Server")
+            self.btn_vite_dev.setStyleSheet("font-size: 10px; background-color: #ef4444; color: white; font-weight: bold;")
+        else:
+            self.btn_vite_dev.setText("Start Vite Server (npm run dev)")
+            self.btn_vite_dev.setStyleSheet("font-size: 10px;")
+            
+        if text in self.queue_workers and self.queue_workers[text].isRunning():
+            self.btn_queue_worker.setText("Stop Queue Worker")
+            self.btn_queue_worker.setStyleSheet("font-size: 10px; background-color: #ef4444; color: white; font-weight: bold;")
+        else:
+            self.btn_queue_worker.setText("Start Queue Worker (artisan queue:work)")
+            self.btn_queue_worker.setStyleSheet("font-size: 10px;")
+            
+        if text in self.scheduler_workers and self.scheduler_workers[text].isRunning():
+            self.btn_scheduler_worker.setText("Stop Scheduler Loop")
+            self.btn_scheduler_worker.setStyleSheet("font-size: 10px; background-color: #ef4444; color: white; font-weight: bold;")
+        else:
+            self.btn_scheduler_worker.setText("Start Scheduler Loop (artisan schedule:work)")
+            self.btn_scheduler_worker.setStyleSheet("font-size: 10px;")
+
+    def import_project(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Laravel Project Root Directory")
+        if not folder:
+            return
+            
+        folder = folder.replace("\\", "/")
+        artisan_file = os.path.join(folder, "artisan")
+        if not os.path.exists(artisan_file):
+            QMessageBox.warning(self, "Invalid Directory", "The selected folder does not contain a Laravel 'artisan' file.")
+            return
+            
+        import json
+        raw_imports = self.main_win.settings.value("imported_projects", "[]")
+        try:
+            imported_paths = json.loads(str(raw_imports))
+        except Exception:
+            imported_paths = []
+            
+        norm_path = os.path.abspath(folder)
+        exists = False
+        for p in imported_paths:
+            if os.path.abspath(p).lower() == norm_path.lower():
+                exists = True
+                break
+                
+        if not exists:
+            imported_paths.append(folder)
+            self.main_win.settings.setValue("imported_projects", json.dumps(imported_paths))
+            self.main_win.settings.sync()
+            
+        self.refresh_project_list()
+        
+        idx = self.cmb_project.findData(norm_path)
+        if idx >= 0:
+            self.cmb_project.setCurrentIndex(idx)
+        else:
+            for i in range(self.cmb_project.count()):
+                if os.path.abspath(self.cmb_project.itemData(i)).lower() == norm_path.lower():
+                    self.cmb_project.setCurrentIndex(i)
+                    break
+        
+        self.log(f"> Imported custom Laravel project: {folder}")
+
     def toggle_vite_dev(self):
         project_name = self.cmb_project.currentText()
         if not project_name:
             QMessageBox.warning(self, "Selection Error", "Please select a Laravel project first.")
             return
 
-        # Check if process is running
-        if project_name in self.dev_processes and self.dev_processes[project_name].poll() is None:
+        if project_name in self.dev_workers and self.dev_workers[project_name].isRunning():
             # Running -> Stop it!
-            self.log(f"> Stopping Vite dev server for '{project_name}'...")
-            try:
-                proc = self.dev_processes[project_name]
-                import subprocess
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                proc.wait()
-            except Exception as e:
-                self.log(f"Error stopping process: {e}")
-            
-            if project_name in self.vite_log_files:
-                try:
-                    self.vite_log_files[project_name].close()
-                except Exception:
-                    pass
-                del self.vite_log_files[project_name]
-                
-            del self.dev_processes[project_name]
-            self.log(f"> Vite dev server for '{project_name}' stopped.")
+            self.log(f"> Stopping Vite dev server for '{project_name}'...", self.vite_console)
+            self.dev_workers[project_name].terminate_process()
+            self.dev_workers[project_name].wait()
+            del self.dev_workers[project_name]
+            self.log(f"> Vite dev server for '{project_name}' stopped.", self.vite_console)
             self.on_project_changed(project_name)
         else:
             # Stopped -> Start it!
-            project_path = os.path.join(self.txt_location.text().strip(), project_name)
+            project_path = self.cmb_project.currentData()
+            if not project_path or not os.path.exists(project_path):
+                QMessageBox.warning(self, "Path Error", "Could not resolve project path.")
+                return
             
-            # Verify package.json contains Vite or dev script
             pkg_json = os.path.join(project_path, "package.json")
             if not os.path.exists(pkg_json):
                 QMessageBox.warning(self, "Missing package.json", "No package.json found. Ensure this is a node project and npm install has run.")
                 return
                 
-            self.log(f"> Starting Vite dev server (npm run dev) in background for '{project_name}'...")
-            
-            # Prepare log file
-            log_path = os.path.join(self.main_win.log_dir, f"vite_{project_name}.log")
-            try:
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
-                with open(log_path, "w") as f:
-                    f.write(f"--- Vite Dev Server Log for '{project_name}' started ---\n")
-                self.vite_log_files[project_name] = open(log_path, "a")
-            except Exception as e:
-                QMessageBox.critical(self, "Log Error", f"Failed to create log file: {e}")
-                return
-
-            import subprocess
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.vite_console.clear()
+            self.log(f"> Starting Vite dev server (npm run dev) in background for '{project_name}'...", self.vite_console)
             
             env = os.environ.copy()
             php_active = os.path.join(self.main_win.env_root, "php", "active")
@@ -857,23 +1179,23 @@ class LaravelView(QWidget):
             env["PATH"] = ";".join([php_active, composer_dir, node_dir]) + ";" + env.get("PATH", "")
             
             cmd = ["cmd.exe", "/c", "npm", "run", "dev"]
+            project_name_base = os.path.basename(project_path)
+            log_path = os.path.join(self.main_win.log_dir, f"vite_{project_name_base}.log")
             
-            try:
-                p = subprocess.Popen(
-                    cmd,
-                    cwd=project_path,
-                    stdout=self.vite_log_files[project_name],
-                    stderr=self.vite_log_files[project_name],
-                    env=env,
-                    startupinfo=startupinfo,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                self.dev_processes[project_name] = p
-                self.log(f"> Vite dev server running in background. Click 'Vite Logs' to see stdout.")
-                self.on_project_changed(project_name)
-            except Exception as e:
-                self.log(f"Failed to start Vite dev server: {e}")
-                QMessageBox.critical(self, "Launch Error", f"Failed to start npm run dev:\n{e}")
+            worker = LiveProcessWorker(cmd, project_path, env, log_path)
+            worker.line_read.connect(lambda line: self.log(line, self.vite_console))
+            
+            def on_finished(code):
+                self.log(f"\n--- Vite Dev Server stopped with code {code} ---", self.vite_console)
+                self.on_project_changed(self.cmb_project.currentText())
+                
+            worker.finished.connect(on_finished)
+            self.dev_workers[project_name] = worker
+            worker.start()
+            
+            # Switch to Vite Server terminal tab
+            self.terminal_tabs.setCurrentIndex(1)
+            self.on_project_changed(project_name)
 
     def run_vite_build(self):
         project_name = self.cmb_project.currentText()
@@ -881,9 +1203,14 @@ class LaravelView(QWidget):
             QMessageBox.warning(self, "Selection Error", "Please select a Laravel project from the list first.")
             return
 
-        project_path = os.path.join(self.txt_location.text().strip(), project_name)
+        project_path = self.cmb_project.currentData()
+        if not project_path or not os.path.exists(project_path):
+            QMessageBox.warning(self, "Path Error", "Could not resolve project path.")
+            return
+            
         self.console.clear()
         self.progress_bar.setVisible(True)
+        self.terminal_tabs.setCurrentIndex(0) # Switch to Artisan & Setup tab
         
         self.build_worker = ViteBuildWorker(
             project_path=project_path,
@@ -900,31 +1227,141 @@ class LaravelView(QWidget):
         else:
             self.log(f"\n> {msg}")
 
-    def show_vite_logs(self):
+    def toggle_queue_worker(self):
         project_name = self.cmb_project.currentText()
         if not project_name:
-            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project from the list first.")
+            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project first.")
             return
 
-        log_path = os.path.join(self.main_win.log_dir, f"vite_{project_name}.log")
-        if not os.path.exists(log_path):
-            QMessageBox.information(self, "No Logs", f"No logs found for '{project_name}'. Start the dev server first.")
-            return
-
-        self.console.clear()
-        self.log(f"--- Showing last Vite logs for '{project_name}' ---")
-        try:
-            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-            for line in lines[-150:]:
-                self.log(line.strip())
-        except Exception as e:
-            self.log(f"Error reading log file: {e}")
-
-    def on_project_changed(self, text):
-        if text in self.dev_processes and self.dev_processes[text].poll() is None:
-            self.btn_vite_dev.setText("Stop Dev")
-            self.btn_vite_dev.setStyleSheet("font-size: 10px; background-color: #ef4444; color: white; font-weight: bold;")
+        if project_name in self.queue_workers and self.queue_workers[project_name].isRunning():
+            # Running -> Stop it!
+            self.log(f"> Stopping Queue worker for '{project_name}'...", self.queue_console)
+            self.queue_workers[project_name].terminate_process()
+            self.queue_workers[project_name].wait()
+            del self.queue_workers[project_name]
+            self.log(f"> Queue worker for '{project_name}' stopped.", self.queue_console)
+            self.on_project_changed(project_name)
         else:
-            self.btn_vite_dev.setText("npm run dev")
-            self.btn_vite_dev.setStyleSheet("font-size: 10px;")
+            # Stopped -> Start it!
+            project_path = self.cmb_project.currentData()
+            if not project_path or not os.path.exists(project_path):
+                QMessageBox.warning(self, "Path Error", "Could not resolve project path.")
+                return
+            
+            artisan_file = os.path.join(project_path, "artisan")
+            if not os.path.exists(artisan_file):
+                QMessageBox.warning(self, "Missing artisan", "No artisan file found in the project directory.")
+                return
+                
+            self.queue_console.clear()
+            self.log(f"> Starting Queue worker (php artisan queue:work) in background for '{project_name}'...", self.queue_console)
+            
+            env = os.environ.copy()
+            php_active = os.path.join(self.main_win.env_root, "php", "active")
+            composer_dir = os.path.join(self.main_win.env_root, "composer")
+            node_dir = os.path.join(self.main_win.env_root, "nodejs")
+            env["PATH"] = ";".join([php_active, composer_dir, node_dir]) + ";" + env.get("PATH", "")
+            
+            cmd = ["cmd.exe", "/c", "php", "artisan", "queue:work"]
+            project_name_base = os.path.basename(project_path)
+            log_path = os.path.join(self.main_win.log_dir, f"queue_{project_name_base}.log")
+            
+            worker = LiveProcessWorker(cmd, project_path, env, log_path)
+            worker.line_read.connect(lambda line: self.log(line, self.queue_console))
+            
+            def on_finished(code):
+                self.log(f"\n--- Queue Worker stopped with code {code} ---", self.queue_console)
+                self.on_project_changed(self.cmb_project.currentText())
+                
+            worker.finished.connect(on_finished)
+            self.queue_workers[project_name] = worker
+            worker.start()
+            
+            # Switch to Queue tab
+            self.terminal_tabs.setCurrentIndex(2)
+            self.on_project_changed(project_name)
+
+    def toggle_scheduler_worker(self):
+        project_name = self.cmb_project.currentText()
+        if not project_name:
+            QMessageBox.warning(self, "Selection Error", "Please select a Laravel project first.")
+            return
+
+        if project_name in self.scheduler_workers and self.scheduler_workers[project_name].isRunning():
+            # Running -> Stop it!
+            self.log(f"> Stopping Scheduler for '{project_name}'...", self.scheduler_console)
+            self.scheduler_workers[project_name].terminate_process()
+            self.scheduler_workers[project_name].wait()
+            del self.scheduler_workers[project_name]
+            self.log(f"> Scheduler for '{project_name}' stopped.", self.scheduler_console)
+            self.on_project_changed(project_name)
+        else:
+            # Stopped -> Start it!
+            project_path = self.cmb_project.currentData()
+            if not project_path or not os.path.exists(project_path):
+                QMessageBox.warning(self, "Path Error", "Could not resolve project path.")
+                return
+            
+            artisan_file = os.path.join(project_path, "artisan")
+            if not os.path.exists(artisan_file):
+                QMessageBox.warning(self, "Missing artisan", "No artisan file found in the project directory.")
+                return
+                
+            self.scheduler_console.clear()
+            self.log(f"> Starting Scheduler (php artisan schedule:work) in background for '{project_name}'...", self.scheduler_console)
+            
+            env = os.environ.copy()
+            php_active = os.path.join(self.main_win.env_root, "php", "active")
+            composer_dir = os.path.join(self.main_win.env_root, "composer")
+            node_dir = os.path.join(self.main_win.env_root, "nodejs")
+            env["PATH"] = ";".join([php_active, composer_dir, node_dir]) + ";" + env.get("PATH", "")
+            
+            cmd = ["cmd.exe", "/c", "php", "artisan", "schedule:work"]
+            project_name_base = os.path.basename(project_path)
+            log_path = os.path.join(self.main_win.log_dir, f"scheduler_{project_name_base}.log")
+            
+            worker = LiveProcessWorker(cmd, project_path, env, log_path)
+            worker.line_read.connect(lambda line: self.log(line, self.scheduler_console))
+            
+            def on_finished(code):
+                self.log(f"\n--- Scheduler stopped with code {code} ---", self.scheduler_console)
+                self.on_project_changed(self.cmb_project.currentText())
+                
+            worker.finished.connect(on_finished)
+            self.scheduler_workers[project_name] = worker
+            worker.start()
+            
+            # Switch to Scheduler tab
+            self.terminal_tabs.setCurrentIndex(3)
+            self.on_project_changed(project_name)
+
+    def cleanup_processes(self):
+        # Clean Vite dev workers
+        for name, worker in list(self.dev_workers.items()):
+            if worker.isRunning():
+                try:
+                    worker.terminate_process()
+                    worker.wait(1000)
+                except Exception:
+                    pass
+        self.dev_workers.clear()
+
+        # Clean Queue workers
+        for name, worker in list(self.queue_workers.items()):
+            if worker.isRunning():
+                try:
+                    worker.terminate_process()
+                    worker.wait(1000)
+                except Exception:
+                    pass
+        self.queue_workers.clear()
+
+        # Clean Scheduler workers
+        for name, worker in list(self.scheduler_workers.items()):
+            if worker.isRunning():
+                try:
+                    worker.terminate_process()
+                    worker.wait(1000)
+                except Exception:
+                    pass
+        self.scheduler_workers.clear()

@@ -436,6 +436,10 @@ class MainWindow(QMainWindow):
         # 4. Stop LaravelView workers
         if getattr(self, 'laravel_view', None) and self.laravel_view is not None:
             try:
+                self.laravel_view.cleanup_processes()
+            except Exception as e:
+                logger.warning(f"Error cleaning laravel_view background processes: {e}")
+            try:
                 for attr in ['create_worker', 'artisan_worker']:
                     worker = getattr(self.laravel_view, attr, None)
                     if worker and worker.isRunning():
